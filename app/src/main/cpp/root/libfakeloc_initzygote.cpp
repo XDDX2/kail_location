@@ -21,6 +21,16 @@ using namespace fakeloc;
 static const char *kOptDir = "/data/kail-loc/zygote_dex";
 static bool gInitLoaded = false;     // byte_5960 / byte_6E28
 
+// doRun 返回码，与 libfakeloc_apphook.cpp 对齐：0x4b4c1000 成功 / 0x4b4c1001 已加载。
+// 注入器 kail_inject 把 x0 当返回值比对（inject64.cpp kDoRunSuccess），
+// void 返回时 x0 是随机值会被误判为 "Inject fail"。
+static constexpr uint64_t kRunSuccess = 0x4b4c1000;
+static constexpr uint64_t kRunAlreadyLoaded = 0x4b4c1001;
+static constexpr uint64_t kRunNullVmPtr = 0x4b4c3001;
+static constexpr uint64_t kRunNullVm = 0x4b4c3002;
+static constexpr uint64_t kRunAttachFailed = 0x4b4c3003;
+static constexpr uint64_t kRunInitFailed = 0x4b4c3004;
+
 // ---------------------------------------------------------------------------
 // init  (sub_1D34 / sub_23E0)
 // ---------------------------------------------------------------------------
@@ -67,30 +77,35 @@ static void init(JNIEnv *env) {
 }
 
 // ---------------------------------------------------------------------------
-// doRun  (sub_205C / sub_2940)
+// doRun  (sub_205C / sub_2940) -- exported entry point used by the injector.
+//
+// 返回 0x4b4c1000 表示成功（与 libfakeloc_apphook / libfakeloc_init 对齐），
+// 否则注入器会把 x0 里的随机值误判为失败，打印 "Inject fail"，
+// 即使 hook 实际已装上。
 // ---------------------------------------------------------------------------
-extern "C" __attribute__((visibility("default"))) void doRun(JavaVM **vmPtr, const char *arg) {
+extern "C" __attribute__((visibility("default"))) uint64_t doRun(JavaVM **vmPtr, const char *arg) {
   (void)arg;
   if (gInitLoaded) {
     KLOGE(kLogTag, "-- Already loaded");
-    return;
+    return kRunAlreadyLoaded;
   }
-  gInitLoaded = true;
 
   if (!vmPtr) {
     KLOGE(kLogTag, "JavaVM** == NULL");
-    return;
+    return kRunNullVmPtr;
   }
   JavaVM *vm = *vmPtr;
   if (!vm) {
     KLOGE(kLogTag, "JavaVM* == NULL");
-    return;
+    return kRunNullVm;
   }
 
   JNIEnv *env = nullptr;
   if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
     KLOGE(kLogTag, "AttachCurrentThread (main) != JNI_OK");
-    return;
+    return kRunAttachFailed;
   }
   init(env);
+  gInitLoaded = true;
+  return kRunSuccess;
 }
