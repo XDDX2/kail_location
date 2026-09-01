@@ -8,9 +8,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,6 +63,18 @@ fun IndependentSimulationScreen(
     var showHelp by remember { mutableStateOf(false) }
     var selectedPackages by remember {
         mutableStateOf(targetPackages.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet())
+    }
+
+    val appInfos = remember(selectedPackages) {
+        val pm = context.packageManager
+        selectedPackages.mapNotNull { pkg ->
+            try {
+                val ai = pm.getApplicationInfo(pkg, 0)
+                AppInfo(pkg, pm.getApplicationLabel(ai)?.toString() ?: pkg)
+            } catch (e: Exception) {
+                AppInfo(pkg, pkg)
+            }
+        }.sortedBy { it.appName }
     }
 
     ModalNavigationDrawer(
@@ -122,92 +138,140 @@ fun IndependentSimulationScreen(
                     .verticalScroll(scrollState)
                     .padding(16.dp)
             ) {
-            // Status Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isEnabled) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = if (isEnabled) stringResource(R.string.ind_sim_running) else stringResource(R.string.ind_sim_stopped),
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = stringResource(R.string.ind_sim_description),
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
+            // Main card + "+" add-app button (top-right overlay)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = if (isEnabled)
+                                stringResource(R.string.ind_sim_running)
+                            else
+                                stringResource(R.string.ind_sim_stopped),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = stringResource(R.string.ind_sim_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Start/Stop Button
+                        BadgedControl(show = showHelp, number = 3) {
+                            Button(
+                                onClick = {
+                                    if (!isEnabled && selectedPackages.isEmpty()) return@Button
+                                    viewModel.setEnabled(!isEnabled)
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isEnabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                ),
+                                enabled = isEnabled || selectedPackages.isNotEmpty()
+                            ) {
+                                Text(
+                                    text = if (isEnabled)
+                                        stringResource(R.string.ind_sim_stop_btn)
+                                    else
+                                        stringResource(R.string.ind_sim_start_btn)
+                                )
+                            }
+                        }
+
+                        if (!isEnabled && selectedPackages.isEmpty()) {
+                            Text(
+                                text = stringResource(R.string.ind_sim_no_apps),
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+                }
+
+                // "+" add app button (overlapping top-end, like RootAppHide)
+                BadgedControl(
+                    show = showHelp,
+                    number = 2,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(y = 16.dp)
+                ) {
+                    FloatingActionButton(
+                        onClick = { showAppPicker = true },
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                        shape = CircleShape,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.ind_sim_target_apps), tint = Color.White)
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Target Apps
-            BadgedControl(show = showHelp, number = 2, modifier = Modifier.fillMaxWidth()) {
-                OutlinedCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = { showAppPicker = true }
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.ind_sim_target_apps),
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Text(
-                                text = if (selectedPackages.isEmpty())
-                                    stringResource(R.string.ind_sim_target_apps_hint)
-                                else
-                                    stringResource(R.string.ind_sim_selected_count, selectedPackages.size),
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = if (selectedPackages.isNotEmpty()) MaterialTheme.colorScheme.primary else Color.Gray
-                        )
-                    }
-                }
-            }
+            // Added apps header
+            Text(
+                text = stringResource(R.string.ind_sim_selected_apps, selectedPackages.size),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Start/Stop Button
-            BadgedControl(show = showHelp, number = 3, modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = {
-                        if (!isEnabled && selectedPackages.isEmpty()) return@Button
-                        viewModel.setEnabled(!isEnabled)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isEnabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                    ),
-                    enabled = isEnabled || selectedPackages.isNotEmpty()
-                ) {
-                    Text(
-                        text = if (isEnabled) stringResource(R.string.ind_sim_stop_btn) else stringResource(R.string.ind_sim_start_btn)
-                    )
-                }
-            }
-
-            if (!isEnabled && selectedPackages.isEmpty()) {
+            // Added apps list (each row deletable)
+            if (appInfos.isEmpty()) {
                 Text(
-                    text = stringResource(R.string.ind_sim_no_apps),
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 8.dp)
+                    text = stringResource(R.string.ind_sim_target_apps_hint),
+                    color = Color.Gray,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 12.dp)
                 )
+            } else {
+                appInfos.forEachIndexed { index, info ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = info.appName,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = info.packageName,
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                            BadgedControl(show = showHelp && index == 0, number = 4) {
+                                IconButton(onClick = {
+                                    val newSet = selectedPackages - info.packageName
+                                    selectedPackages = newSet
+                                    viewModel.setTargetPackages(newSet.joinToString(","))
+                                }) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = stringResource(R.string.ind_sim_selected_apps),
+                                        tint = Color.Red
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
             }
 
             if (showAppPicker) {
@@ -226,8 +290,9 @@ fun IndependentSimulationScreen(
             showHelp = showHelp,
             entries = listOf(
                 1 to R.string.help_ind_sim_menu,
-                2 to R.string.help_ind_sim_target_apps,
-                3 to R.string.help_ind_sim_toggle
+                2 to R.string.help_ind_sim_add_app,
+                3 to R.string.help_ind_sim_toggle,
+                4 to R.string.help_ind_sim_remove_app
             ),
             onDismiss = { showHelp = false }
         )

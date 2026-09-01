@@ -745,6 +745,7 @@
     <string name="ind_sim_select_apps">選擇目標應用</string>
     <string name="ind_sim_search_apps">搜尋應用</string>
     <string name="ind_sim_selected_count">已選擇 %d 個應用</string>
+    <string name="ind_sim_selected_apps">已選擇的應用（%d）</string>
     <string name="wifi_sim_title">WiFi 模擬</string>
     <string name="wifi_sim_enable">啟用 WiFi 模擬</string>
     <string name="wifi_sim_enable_summary">偽造 WiFi 掃描結果與連線資訊</string>
@@ -798,6 +799,8 @@
     <string name="cell_sim_fetch_network">從網路取得基地台</string>
     <string name="cell_sim_fetching_network">正在取得...</string>
     <string name="cell_sim_history">歷史紀錄</string>
+    <string name="cell_sim_selected_count">已加入的基地台（%d）</string>
+    <string name="wifi_sim_selected_count">已加入的 Wi-Fi（%d）</string>
     <string-array name="array_sim_scheme">
         <item>@string/setting_sim_fourier</item>
         <item>@string/setting_sim_sine_noise</item>

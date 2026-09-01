@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -128,13 +129,6 @@ fun CellSimulationScreen(
                     )
                 )
             },
-            floatingActionButton = {
-                BadgedControl(show = showHelp, number = 2) {
-                    FloatingActionButton(onClick = { showAddDialog = true }) {
-                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cell_sim_add))
-                    }
-                }
-            },
             snackbarHost = { SnackbarHost(snackbarHostState) }
         ) { paddingValues ->
             Column(
@@ -142,42 +136,59 @@ fun CellSimulationScreen(
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-            // Target Cell Card
-            if (activeList.isNotEmpty()) {
-                CellTargetCard(
-                    activeList = activeList,
-                    isSimulating = isSimulating,
-                    showHelp = showHelp,
-                    onStartSimulating = { viewModel.setSimulating(true) },
-                    onStopSimulating = { viewModel.setSimulating(false) },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
-                )
-            } else {
-                // Empty state card
-                Card(
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 16.dp)
-                ) {
-                    Column(
+            // Target Card + "+" add button (top-right overlay, like IndependentSimulation)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (activeList.isNotEmpty()) {
+                    CellTargetCard(
+                        activeList = activeList,
+                        isSimulating = isSimulating,
+                        showHelp = showHelp,
+                        onStartSimulating = { viewModel.setSimulating(true) },
+                        onStopSimulating = { viewModel.setSimulating(false) },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                    )
+                } else {
+                    // Empty state card
+                    Card(
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
-                            .padding(16.dp)
-                            .fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 16.dp)
                     ) {
-                        Text(
-                            text = stringResource(R.string.cell_sim_empty_text),
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = stringResource(R.string.cell_sim_scan_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
+                        Column(
+                            modifier = Modifier
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = stringResource(R.string.cell_sim_empty_text),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = stringResource(R.string.cell_sim_scan_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                }
+
+                BadgedControl(
+                    show = showHelp,
+                    number = 2,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(y = 16.dp)
+                ) {
+                    FloatingActionButton(
+                        onClick = { showAddDialog = true },
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                        shape = CircleShape,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cell_sim_add), tint = Color.White)
                     }
                 }
             }
@@ -247,9 +258,10 @@ fun CellSimulationScreen(
             }
             if (cellList.isNotEmpty()) {
                 Text(
-                    text = stringResource(R.string.cell_sim_history),
-                    color = Color.Gray,
+                    text = stringResource(R.string.cell_sim_selected_count, cellList.size),
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 24.dp, end = 16.dp, bottom = 4.dp)
                 )
             }

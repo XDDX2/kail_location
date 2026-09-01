@@ -422,6 +422,7 @@
     <string name="ind_sim_select_apps">选择目标应用</string>
     <string name="ind_sim_search_apps">搜索应用</string>
     <string name="ind_sim_selected_count">已选择 %d 个应用</string>
+    <string name="ind_sim_selected_apps">已选择的应用（%d）</string>
 
     <!-- Root &amp; App Hiding -->
     <string name="nav_menu_root_app_hide">Root与应用隐藏</string>
@@ -553,6 +554,8 @@
     <string name="cell_sim_fetch_network">从网络获取基站</string>
     <string name="cell_sim_fetching_network">正在获取...</string>
     <string name="cell_sim_history">历史记录</string>
+    <string name="cell_sim_selected_count">已添加的基站（%d）</string>
+    <string name="wifi_sim_selected_count">已添加的 Wi-Fi（%d）</string>
     <string name="cell_type_gsm">GSM</string>
     <string name="cell_type_cdma">CDMA</string>
     <string name="cell_type_lte">LTE</string>

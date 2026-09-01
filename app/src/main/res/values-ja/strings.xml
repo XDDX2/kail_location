@@ -759,6 +759,7 @@
     <string name="ind_sim_select_apps">対象アプリを選択</string>
     <string name="ind_sim_search_apps">アプリを検索</string>
     <string name="ind_sim_selected_count">%d 個のアプリを選択</string>
+    <string name="ind_sim_selected_apps">選択されたアプリ（%d）</string>
     <string name="wifi_sim_title">WiFi シミュレーション</string>
     <string name="wifi_sim_enable">WiFi シミュレーションを有効にする</string>
     <string name="wifi_sim_enable_summary">WiFi スキャン結果と接続情報を偽装</string>
@@ -812,6 +813,8 @@
     <string name="cell_sim_fetch_network">ネットワークから基地局を取得</string>
     <string name="cell_sim_fetching_network">取得中...</string>
     <string name="cell_sim_history">履歴</string>
+    <string name="cell_sim_selected_count">追加済みの基地局（%d）</string>
+    <string name="wifi_sim_selected_count">追加済みの Wi-Fi（%d）</string>
     <string-array name="array_sim_scheme">
         <item>@string/setting_sim_fourier</item>
         <item>@string/setting_sim_sine_noise</item>

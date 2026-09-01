@@ -774,6 +774,7 @@
     <string name="ind_sim_select_apps">Select Target Apps</string>
     <string name="ind_sim_search_apps">Search Apps</string>
     <string name="ind_sim_selected_count">%d app(s) selected</string>
+    <string name="ind_sim_selected_apps">Selected apps (%d)</string>
 
     <!-- WiFi Simulation -->
     <string name="wifi_sim_title">WiFi Simulation</string>
@@ -831,6 +832,8 @@
     <string name="cell_sim_fetch_network">Fetch from Network</string>
     <string name="cell_sim_fetching_network">Fetching...</string>
     <string name="cell_sim_history">History</string>
+    <string name="cell_sim_selected_count">Added cells (%d)</string>
+    <string name="wifi_sim_selected_count">Added Wi-Fi (%d)</string>
 
 
     <string name="setting_opencellid_key">OpenCellID API Key</string>

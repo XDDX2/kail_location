@@ -122,18 +122,6 @@ fun WifiSimulationScreen(
                         actionIconContentColor = Color.White
                     )
                 )
-            },
-            floatingActionButton = {
-                BadgedControl(show = showHelp, number = 2) {
-                    FloatingActionButton(
-                        onClick = onAddClick,
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.White,
-                        shape = CircleShape
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.wifi_sim_add))
-                    }
-                }
             }
         ) { paddingValues ->
             Column(
@@ -141,77 +129,94 @@ fun WifiSimulationScreen(
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-            // Target WiFi Card (like RouteCard in RouteSimulationScreen)
-            if (activeList.isNotEmpty()) {
-                WifiTargetCard(
-                    activeList = activeList,
-                    isSimulating = isSimulating,
-                    onStartSimulating = {
-                        viewModel.setSimulating(true)
-                    },
-                    onStopSimulating = { viewModel.setSimulating(false) },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
-                    showHelp = showHelp
-                )
-            } else {
-                // Empty state card with scan button
-                Card(
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 16.dp)
-                ) {
-                    Column(
+            // Target WiFi Card + "+" add button (top-right overlay, like IndependentSimulation)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (activeList.isNotEmpty()) {
+                    WifiTargetCard(
+                        activeList = activeList,
+                        isSimulating = isSimulating,
+                        onStartSimulating = {
+                            viewModel.setSimulating(true)
+                        },
+                        onStopSimulating = { viewModel.setSimulating(false) },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                        showHelp = showHelp
+                    )
+                } else {
+                    // Empty state card with scan button
+                    Card(
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                        shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
-                            .padding(16.dp)
-                            .fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 16.dp)
                     ) {
-                        Text(
-                            text = stringResource(R.string.wifi_sim_empty_text),
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = stringResource(R.string.wifi_sim_scan_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        BadgedControl(show = showHelp, number = 5) {
-                            Button(
-                                onClick = {
-                                    viewModel.scanNearbyWifi()
-                                    showScanDialog = true
-                                },
-                                enabled = !isScanning,
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                shape = RoundedCornerShape(20.dp)
-                            ) {
-                                if (isScanning) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        color = Color.White,
-                                        strokeWidth = 2.dp
+                        Column(
+                            modifier = Modifier
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = stringResource(R.string.wifi_sim_empty_text),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = stringResource(R.string.wifi_sim_scan_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            BadgedControl(show = showHelp, number = 5) {
+                                Button(
+                                    onClick = {
+                                        viewModel.scanNearbyWifi()
+                                        showScanDialog = true
+                                    },
+                                    enabled = !isScanning,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                    shape = RoundedCornerShape(20.dp)
+                                ) {
+                                    if (isScanning) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            color = Color.White,
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                    }
+                                    Text(
+                                        text = if (isScanning) stringResource(R.string.wifi_sim_scanning) else stringResource(R.string.wifi_sim_scan_nearby),
+                                        fontSize = 14.sp
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Default.Search,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
                                 }
-                                Text(
-                                    text = if (isScanning) stringResource(R.string.wifi_sim_scanning) else stringResource(R.string.wifi_sim_scan_nearby),
-                                    fontSize = 14.sp
-                                )
                             }
-                        }
 
+                        }
+                    }
+                }
+
+                BadgedControl(
+                    show = showHelp,
+                    number = 2,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(y = 16.dp)
+                ) {
+                    FloatingActionButton(
+                        onClick = onAddClick,
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                        shape = CircleShape,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.wifi_sim_add), tint = Color.White)
                     }
                 }
             }
@@ -260,9 +265,10 @@ fun WifiSimulationScreen(
             }
             if (wifiList.isNotEmpty()) {
                 Text(
-                    text = stringResource(R.string.wifi_sim_history),
-                    color = Color.Gray,
+                    text = stringResource(R.string.wifi_sim_selected_count, wifiList.size),
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 24.dp, end = 16.dp, bottom = 4.dp)
                 )
             }
