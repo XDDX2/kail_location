@@ -239,11 +239,21 @@ static uint64_t findLibraryBaseAddress(const char *libraryPath, int pid) {
   }
 
   // Fallback: match by basename only (catches cases where maps shows a
-  // resolved/symlinked path different from the dlopen argument)
+  // resolved/symlinked path different from the dlopen argument).
+  // System library mappings (/apex, /system, /vendor, ...) must NOT satisfy a
+  // fallback match: stock processes map /apex/.../libc.so, and the
+  // runtime-tree probe in injectLibraryIntoProcess would otherwise
+  // misclassify a normal zygote64/system_server as a VMOS guest, then resolve
+  // remote dlopen/doRun symbols through VMOS paths, break the ASLR slide and
+  // fault immediately.
   if (!base && baseName) {
     rewind(fp);
     while (fgets(line, sizeof(line), fp)) {
       if (strstr(line, baseName) && strchr(line, '/')) {
+        if (strstr(line, "/apex/") || strstr(line, "/system/") ||
+            strstr(line, "/vendor/") || strstr(line, "/system_ext/") ||
+            strstr(line, "/product/"))
+          continue;
         base = strtoul(line, nullptr, 16);
         break;
       }

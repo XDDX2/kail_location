@@ -85,16 +85,7 @@ Feature requests and feedback are welcome via issues.
 
 ## FAQ
 
-### 1.Search / Navigation Simulation not working
-
-Make sure a **Baidu Map API Key** has been configured. The search and navigation features depend on the Baidu Maps SDK — you need to apply for an Access Key (AK) and fill it in the app.
-
-See the guide: [docs/baiduApiKey.md](docs/baiduApiKey.md)
-
-### 2.Root mode prompts for root access but fails
-
-Solution: Install KailLocation 1.6.5 and KailLocationXposed, then start simulation in root mode.
-
+https://www.kaillocation.xyz/faq.html
 ---
 
 ## Contact

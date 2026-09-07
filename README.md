@@ -84,16 +84,7 @@
 ---
 
 ## 常见问题
-
-### 1.搜索功能 / 模拟导航不能用
-
-请检查是否已配置 **百度地图 API Key**。搜索和导航依赖百度地图 SDK，需申请并填入 AK。
-
-参考申请教程：[docs/baiduApiKey.md](docs/baiduApiKey.md)
-
-### 2.如果root模式提示获取root类似的
-
-解决办法：可以安装1.6.5的kaillocation与 KailLocationXposed,然后root模式下开始模拟就可以了
+https://www.kaillocation.xyz/faq.html
 
 ---
 

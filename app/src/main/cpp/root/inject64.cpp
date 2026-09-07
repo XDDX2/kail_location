@@ -22,6 +22,7 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <getopt.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -234,11 +235,20 @@ static uint64_t findLibraryBaseAddress(const char *libraryPath, int pid) {
   }
 
   // Fallback: match by basename only (catches cases where maps shows a
-  // resolved/symlinked path different from the dlopen argument)
+  // resolved/symlinked path different from the dlopen argument).
+  // System library mappings (/apex, /system, /vendor, ...) must NOT satisfy a
+  // fallback match: stock processes map /apex/.../libc.so, and the runtime-tree
+  // probe in injectLibraryIntoProcess would otherwise misclassify a normal
+  // zygote64/system_server as a VMOS guest, then resolve remote dlopen/doRun
+  // symbols through VMOS paths, break the ASLR slide and fault immediately.
   if (!base && baseName) {
     rewind(fp);
     while (fgets(line, sizeof(line), fp)) {
       if (strstr(line, baseName) && strchr(line, '/')) {
+        if (strstr(line, "/apex/") || strstr(line, "/system/") ||
+            strstr(line, "/vendor/") || strstr(line, "/system_ext/") ||
+            strstr(line, "/product/"))
+          continue;
         base = strtoul(line, nullptr, 16);
         break;
       }
@@ -335,8 +345,20 @@ static uint64_t callRemoteFunction(uint64_t func, int argc, ...) {
     }
     pid_t r = waitpid(gTargetPid, &status, WUNTRACED | WNOHANG);
     if (r == gTargetPid) {
-      if ((status & 0xff7f) == 0xb7f) // stopped by SIGSEGV
+      if ((status & 0xff7f) == 0xb7f) { // stopped by SIGSEGV
+        // FORENSIC: capture the exact fault address of the SIGSEGV.
+        siginfo_t si = {};
+        if (ptrace(PTRACE_GETSIGINFO, gTargetPid, 0, &si) == 0) {
+          KLOGI(kInjectorLogTag,
+                "remote fault: signo=%d code=%d addr=0x%llx (func=0x%llx)",
+                si.si_signo, si.si_code, (unsigned long long)si.si_addr,
+                (unsigned long long)func);
+          printf("inject diag: fault signo=%d code=%d addr=0x%llx func=0x%llx\n",
+                 si.si_signo, si.si_code, (unsigned long long)si.si_addr,
+                 (unsigned long long)func);
+        }
         break;
+      }
       ptraceWithRetry("waitpid", PTRACE_CONT, 0, 0);
       continue;
     }
@@ -363,6 +385,11 @@ static uint64_t callRemoteFunction(uint64_t func, int argc, ...) {
   iov.iov_base = regs;
   iov.iov_len  = sizeof(regs);
   ptraceWithRetry("return", PTRACE_GETREGSET, NT_PRSTATUS, (uintptr_t)&iov);
+
+  // FORENSIC: where did the SIGSEGV land? regs[32] is pc at stop time.
+  printf("inject diag: post-call pc=0x%llx sp=0x%llx x0=0x%llx\n",
+         (unsigned long long)regs[32], (unsigned long long)regs[31],
+         (unsigned long long)regs[0]);
 
   iov.iov_base = backup;
   iov.iov_len  = sizeof(backup);
@@ -429,6 +456,18 @@ static int injectLibraryIntoProcess(int pid, const char *libraryPath, const char
 
   kill(gTargetPid, SIGSTOP);
   waitForRemoteStop();
+
+  // FORENSIC: snapshot where the target thread was parked when we stopped it.
+  {
+    uint64_t origRegs[34] = {0};
+    struct iovec origIov;
+    origIov.iov_base = origRegs;
+    origIov.iov_len  = sizeof(origRegs);
+    ptraceWithRetry("originals", PTRACE_GETREGSET, NT_PRSTATUS, (uintptr_t)&origIov);
+    printf("inject diag: original pc=0x%llx sp=0x%llx x0=0x%llx\n",
+           (unsigned long long)origRegs[32], (unsigned long long)origRegs[31],
+           (unsigned long long)origRegs[0]);
+  }
 
   // Resolve which runtime tree the target uses (VMOS / Twoyi / VPhoneGaGa /
   // stock Android) by probing libc base addresses.
