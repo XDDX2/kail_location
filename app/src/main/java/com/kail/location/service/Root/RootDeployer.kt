@@ -576,12 +576,12 @@ object RootDeployer {
         // The injector and the loader are deployed for the device's primary ABI
         // only, so target the matching zygote flavor (zygote64 on 64-bit
         // devices). PTRACE across bitness would corrupt regs reads.
-        val name = if (preferredAbi() == "arm64-v8a" || preferredAbi() == "x86_64") "zygote64" else "zygote"
+        val name = zygoteProcessName()
         val pid = findZygotePid(name) ?: run {
             KailLog.w(null, TAG, "injectZygote: no $name process found")
             return false
         }
-        val cmd = "${injector.absolutePath} -p $pid -l ${zygoteLoader.absolutePath} -n com.kail.location"
+        val cmd = "${injector.absolutePath} -Z -p $pid -l ${zygoteLoader.absolutePath} -n com.kail.location"
         val out = rootCmd(cmd, ROOT_INJECT_TIMEOUT_MS)
         KailLog.i(null, TAG, "kail_inject ($name pid=$pid) -> $out")
         if (!out.contains("Inject ok")) {
@@ -607,14 +607,25 @@ object RootDeployer {
         }.toMap()
         val boot = values["kernel_btime_sec"]?.toLongOrNull() ?: return false
         val appVersionName = values["app_version_name"]?.trim() ?: return false
+        val recordedPids = values["zygote_pid"]?.trim()?.split(",")?.map { it.trim() }.orEmpty()
         val current = boot > 0 &&
             boot == kernelBootTimeSec() &&
-            appVersionName == currentAppVersionName(context)
+            appVersionName == currentAppVersionName(context) &&
+            recordedPids.isNotEmpty() &&
+            recordedPids.any { it == findZygotePid(zygoteProcessName()) }
         if (!current) {
-            KailLog.i(null, TAG, "zygote state stale: state=$values boot=$boot app=$appVersionName")
+            KailLog.i(
+                null, TAG,
+                "zygote state stale: state=$values boot=$boot app=$appVersionName " +
+                    "currentZygote=${findZygotePid(zygoteProcessName())} recorded=${recordedPids.joinToString(",")}"
+            )
         }
         return current
     }
+
+    /** zygote 进程名：按设备主 ABI 匹配（与 [injectZygote] 一致）。 */
+    private fun zygoteProcessName(): String =
+        if (preferredAbi() == "arm64-v8a" || preferredAbi() == "x86_64") "zygote64" else "zygote"
 
     private fun markZygoteInjectionCurrent(context: Context, zygotePids: List<String>) {
         if (zygotePids.isEmpty()) return

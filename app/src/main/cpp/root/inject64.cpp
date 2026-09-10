@@ -40,6 +40,12 @@
 static const char *kInjectorLogTag = "LINJECT/Injector";
 static int   gVerboseLoggingEnabled = 1;          // dword_5278
 static int   gTargetPid             = 0;          // dword_5288
+// Zygote mode (-Z): use the NeoZygisk-style hardened attach/call/detach path
+// (PTRACE_SEIZE + BTYPE clearing + libc non-exec return address + GKI 2.0
+// detach workaround). Only enabled explicitly so the proven system_server /
+// app injection path stays byte-for-byte identical.
+static bool  gZygoteMode           = false;
+static bool  gAttachedViaSeize     = false;
 
 static uint64_t gRemoteDlopen  = 0;               // qword_5290
 static uint64_t gRemoteDlerror = 0;               // qword_5298
@@ -115,6 +121,8 @@ static uint64_t nowMillis() {
 }
 
 static void waitForRemoteStop() {
+  if (gZygoteMode && gAttachedViaSeize)
+    return;  // SEIZE mode: tracee is already stopped at the event stop.
   kill(gTargetPid, SIGSTOP);
 
   uint64_t start = nowMillis();
@@ -260,6 +268,39 @@ static uint64_t findLibraryBaseAddress(const char *libraryPath, int pid) {
 }
 
 // ---------------------------------------------------------------------------
+// findLibcNonExecReturnAddr (NeoZygisk-style)
+//   Scan /proc/<pid>/maps for the first mapping of libc.so without the
+//   executable permission and return its start address. Used as the remote
+//   LR in zygote mode: when a remote call "returns", it traps with SIGSEGV at
+//   this address instead of 0, which is more predictable across kernels.
+// ---------------------------------------------------------------------------
+static uint64_t findLibcNonExecReturnAddr(int pid) {
+  char mapsPath[256];
+  snprintf(mapsPath, sizeof(mapsPath), "/proc/%d/maps", pid);
+  FILE *fp = fopen(mapsPath, "rt");
+  if (!fp)
+    return 0;
+
+  uint64_t addr = 0;
+  char line[1024] = {0};
+  while (fgets(line, sizeof(line), fp)) {
+    if (!strstr(line, "libc.so"))
+      continue;
+    // perms field is the 2nd column (r-w-x-p).
+    const char *perms = strchr(line, ' ');
+    if (!perms)
+      continue;
+    perms++;
+    if (perms[0] == 'r' && perms[1] != 'x' && strchr(line, '/')) {
+      addr = strtoull(line, nullptr, 16);
+      break;
+    }
+  }
+  fclose(fp);
+  return addr;
+}
+
+// ---------------------------------------------------------------------------
 // resolveRemoteSymbolAddress  (sub_25E8)
 //   Translate a local symbol address into the remote process by applying the
 //   difference between the local and remote module base addresses.
@@ -311,7 +352,23 @@ static uint64_t callRemoteFunction(uint64_t func, int argc, ...) {
     regs[i] = va_arg(ap, uint64_t);   // x0..x7
   va_end(ap);
 
-  regs[30] = 0;        // x30 (lr) -> 0  : return address faults
+  uint64_t zygoteReturnAddr = 0;
+  if (gZygoteMode) {
+    // NeoZygisk-style: LR points at a non-executable libc mapping so the
+    // remote call traps deterministically at a real address, and the BTYPE
+    // bits of PSTATE (10..11) are cleared — the zygote thread is typically
+    // stopped right after an indirect branch (BTYPE=0b11), and jumping into
+    // BTI-protected bionic functions with that value raises SIGILL.
+    zygoteReturnAddr = findLibcNonExecReturnAddr(gTargetPid);
+    regs[30] = zygoteReturnAddr;
+    regs[33] &= ~(3ULL << 10);
+    if (zygoteReturnAddr == 0) {
+      KLOGE(kInjectorLogTag, "zygote mode: no non-exec libc mapping; falling back to LR=0");
+      regs[30] = 0;
+    }
+  } else {
+    regs[30] = 0;        // x30 (lr) -> 0  : return address faults
+  }
   regs[32] = func;     // pc
   // The thumb-bit handling below is dead leftover from the 32-bit variant; it
   // is harmless on aarch64 and preserved for behavioural fidelity.
@@ -390,11 +447,24 @@ static uint64_t callRemoteFunction(uint64_t func, int argc, ...) {
   printf("inject diag: post-call pc=0x%llx sp=0x%llx x0=0x%llx\n",
          (unsigned long long)regs[32], (unsigned long long)regs[31],
          (unsigned long long)regs[0]);
+  if (gZygoteMode && zygoteReturnAddr != 0 && regs[32] != zygoteReturnAddr) {
+    KLOGE(kInjectorLogTag,
+          "zygote mode: stopped at pc=0x%llx, expected return addr 0x%llx",
+          (unsigned long long)regs[32], (unsigned long long)zygoteReturnAddr);
+    printf("inject diag: zygote stop mismatch pc=0x%llx ret=0x%llx\n",
+           (unsigned long long)regs[32], (unsigned long long)zygoteReturnAddr);
+  }
 
   iov.iov_base = backup;
   iov.iov_len  = sizeof(backup);
   ptraceWithRetry("restore", PTRACE_SETREGSET, NT_PRSTATUS, (uintptr_t)&iov);
-  ptraceWithRetry("continue", PTRACE_CONT, 0, 0);
+  if (!gZygoteMode) {
+    // Legacy path: resume the tracee after restoring the original registers.
+    ptraceWithRetry("continue", PTRACE_CONT, 0, 0);
+  }
+  // Zygote mode (SEIZE): keep the tracee stopped at the SIGSEGV stop; the next
+  // remote call overwrites the registers again, and only the final detach
+  // (GKI workaround: PTRACE_SYSCALL + PTRACE_DETACH SIGCONT) lets it run.
 
   return regs[0];
 }
@@ -449,13 +519,60 @@ static int injectLibraryIntoProcess(int pid, const char *libraryPath, const char
   gTargetPid = pid;
   gRemoteStopCallback = waitForRemoteStop;
 
-  if (ptraceWithRetry("attach", PTRACE_ATTACH, 0, 0) == -1) {
-    LOGV("Failed to attach to process %d", gTargetPid);
-    return 1;
+  if (gZygoteMode) {
+    // NeoZygisk-style attach: PTRACE_SEIZE first (no SIGSTOP, clean
+    // PTRACE_EVENT_STOP), falling back to classic ATTACH. In seize mode the
+    // tracee is already stopped after the event stop; skip the extra SIGSTOP.
+    if (ptrace(PTRACE_SEIZE, gTargetPid, 0, PTRACE_O_EXITKILL) == -1) {
+      if (errno != EIO) {
+        LOGV("PTRACE_SEIZE failed errno=%d", errno);
+        return 1;
+      }
+      KLOGI(kInjectorLogTag, "zygote mode: SEIZE EIO, falling back to ATTACH");
+      if (ptraceWithRetry("attach", PTRACE_ATTACH, 0, 0) == -1) {
+        LOGV("Failed to attach to process %d", gTargetPid);
+        return 1;
+      }
+      gAttachedViaSeize = false;
+      kill(gTargetPid, SIGSTOP);
+      waitForRemoteStop();
+    } else {
+      gAttachedViaSeize = true;
+      // PTRACE_SEIZE does NOT stop the tracee by itself: a running process
+      // only reports PTRACE_EVENT_STOP when it stops (signal / group stop) or
+      // when the tracer requests it via PTRACE_INTERRUPT. Running zygote
+      // never stops on its own, so interrupt it explicitly.
+      if (ptrace(PTRACE_INTERRUPT, gTargetPid, 0, 0) == -1) {
+        KLOGE(kInjectorLogTag, "zygote mode: PTRACE_INTERRUPT failed errno=%d", errno);
+        return 1;
+      }
+      // Bounded wait (no watchdog on this path -> would deadlock forever).
+      uint64_t deadline = nowMillis() + 5000;
+      bool stopped = false;
+      int status = 0;
+      while (nowMillis() < deadline) {
+        pid_t r = waitpid(gTargetPid, &status, __WALL | WNOHANG);
+        if (r == gTargetPid) {
+          stopped = true;
+          break;
+        }
+        if (r == -1)
+          break;
+        usleep(2000);
+      }
+      if (!stopped) {
+        KLOGE(kInjectorLogTag, "zygote mode: no event stop after INTERRUPT");
+        return 1;
+      }
+    }
+  } else {
+    if (ptraceWithRetry("attach", PTRACE_ATTACH, 0, 0) == -1) {
+      LOGV("Failed to attach to process %d", gTargetPid);
+      return 1;
+    }
+    kill(gTargetPid, SIGSTOP);
+    waitForRemoteStop();
   }
-
-  kill(gTargetPid, SIGSTOP);
-  waitForRemoteStop();
 
   // FORENSIC: snapshot where the target thread was parked when we stopped it.
   {
@@ -624,8 +741,22 @@ static int injectLibraryIntoProcess(int pid, const char *libraryPath, const char
   }
 
   waitForRemoteStop();
-  ptraceWithRetry("detach", PTRACE_DETACH, 0, 0);
-  kill(gTargetPid, SIGCONT);
+  if (gZygoteMode) {
+    // GKI 2.0 workaround: advance the tracee by one syscall stop to clear the
+    // kernel-side ptrace signal-stop state, then detach with SIGCONT so the
+    // zygote resumes cleanly.
+    if (ptrace(PTRACE_SYSCALL, gTargetPid, 0, 0) == -1) {
+      KLOGE(kInjectorLogTag, "zygote mode: PTRACE_SYSCALL failed, force detach");
+      ptrace(PTRACE_DETACH, gTargetPid, 0, SIGCONT);
+    } else {
+      int st = 0;
+      waitpid(gTargetPid, &st, __WALL);
+      ptrace(PTRACE_DETACH, gTargetPid, 0, SIGCONT);
+    }
+  } else {
+    ptraceWithRetry("detach", PTRACE_DETACH, 0, 0);
+    kill(gTargetPid, SIGCONT);
+  }
   return result;
 }
 
@@ -641,8 +772,11 @@ static int injectMain(int argc, char **argv) {
 
   int opt;
   bool ok = true;
-  while ((opt = getopt(argc, argv, "p:P:l:n:a:h")) != -1) {
+  while ((opt = getopt(argc, argv, "p:P:l:n:a:hZ")) != -1) {
     switch (opt) {
+      case 'Z':
+        gZygoteMode = true;
+        break;
       case 'l':
         libraryPath = optarg;
         break;

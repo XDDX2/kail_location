@@ -85,18 +85,19 @@ static void init(JNIEnv *env) {
 // ---------------------------------------------------------------------------
 extern "C" __attribute__((visibility("default"))) uint64_t doRun(JavaVM **vmPtr, const char *arg) {
   (void)arg;
+  (void)vmPtr;
+  // On the ZTE/stock zygote the injector's AndroidRuntime::mJavaVM symbol
+  // resolution points at the wrong mapping (the hardcoded /system/lib64
+  // path does not match the zygote's /apex/com.android.runtime image), so
+  // *vmPtr is garbage. Resolve the VM ourselves via JNI_GetCreatedJavaVMs.
   if (gInitLoaded) {
     KLOGE(kLogTag, "-- Already loaded");
     return kRunAlreadyLoaded;
   }
 
-  if (!vmPtr) {
-    KLOGE(kLogTag, "JavaVM** == NULL");
-    return kRunNullVmPtr;
-  }
-  JavaVM *vm = *vmPtr;
+  JavaVM *vm = getJavaVM();
   if (!vm) {
-    KLOGE(kLogTag, "JavaVM* == NULL");
+    KLOGE(kLogTag, "getJavaVM() returned NULL");
     return kRunNullVm;
   }
 
