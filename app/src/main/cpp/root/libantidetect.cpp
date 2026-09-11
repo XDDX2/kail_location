@@ -165,13 +165,17 @@ static const char *relocateByFileNames(const char *path) {
   return path;
 }
 
-// Shared rewrite for fopen/open/open64/system: handle /maps and /su specially,
-// then fall back to the registered-name replacement.
+// Shared rewrite for fopen/open/open64/openat/system: handle /maps and /su
+// specially, then fall back to the registered-name replacement.
 static const char *rewriteForFileOrExec(const char *path) {
   if (gMocking != 1 || !path)
     return path;
+  // /proc/<pid>/maps, /proc/self/task/<tid>/maps, /proc/self/smaps: redirect to
+  // status so a detector scanning for our injected .so names sees no mappings.
   if (endsWith(path, "/maps"))
     return strrpc(path, "/maps", "/status");
+  if (endsWith(path, "/smaps"))
+    return strrpc(path, "/smaps", "/status");
   if (endsWith(path, "/su"))
     return strrpc(path, "/su", "/su_f");
   return relocateByFileNames(path);
@@ -313,13 +317,13 @@ static int hook_chdir(const char *path) {
   return src_chdir(ANTIDETECT_PATH(path));
 }
 static int hook___openat(int fd, const char *path, int flags, int mode) {
-  return src___openat(fd, ANTIDETECT_PATH(path), flags, mode);
+  return src___openat(fd, rewriteForFileOrExec(path), flags, mode);
 }
 static int hook_openat(int fd, const char *path, int flags, int mode) {
-  return src_openat(fd, ANTIDETECT_PATH(path), flags, mode);
+  return src_openat(fd, rewriteForFileOrExec(path), flags, mode);
 }
 static int hook___open(const char *path, int flags, int mode) {
-  return src___open(ANTIDETECT_PATH(path), flags, mode);
+  return src___open(rewriteForFileOrExec(path), flags, mode);
 }
 static int hook___statfs(const char *path, size_t sz, void *st) {
   return src___statfs(ANTIDETECT_PATH(path), sz, st);

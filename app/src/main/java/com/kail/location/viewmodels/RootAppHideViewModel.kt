@@ -105,10 +105,11 @@ class RootAppHideViewModel(application: Application) : AndroidViewModel(applicat
                     ctx.startService(intent)
                 }
             } else {
-                // 停止：即使服务当前没在运行，也必须把 stop 指令送进去——服务会写
-                // enabled=0 的配置（目标进程的 hook 实时读取后即停止隐藏）再 stopSelf。
-                // 之前这里 `if (!isRunning) return`，导致「App/服务重启后再点停止」无效：
-                // 配置文件仍是 enabled=1，目标进程继续隐藏，表现就是"停止不了"。
+                // 停止：UI 进程直接清 Provider + 文件配置，不依赖 ServiceGoRoot 是否
+                // 存活/被 ROM 冻结。否则服务一旦被冻结/卡死，onStartCommand 不执行，
+                // 配置永远停在 enabled=1，表现为"点停止没反应、目标应用继续隐藏"。
+                clearHideConfigDirectly()
+                // 再通知服务 force-stop 目标进程（best effort；服务不可用不影响已清配置）。
                 val intent = android.content.Intent(ctx, svc).apply {
                     putExtra(
                         com.kail.location.service.Root.ServiceGoRoot.EXTRA_CONTROL_ACTION,
@@ -126,5 +127,35 @@ class RootAppHideViewModel(application: Application) : AndroidViewModel(applicat
         } catch (e: Exception) {
             KailLog.e(getApplication(), TAG, "pushHideConfig failed", e)
         }
+    }
+
+    /**
+     * 停止隐藏时，由 UI 进程直接清掉 Provider + 文件里的隐藏配置。
+     *
+     * 目标进程的 [com.kail.location.inject.utils.HideConfigFile] /
+     * [com.kail.location.inject.utils.AntiDetectConfigFile] 都是 Provider 优先、
+     * 文件兜底，两边都写 enabled=0 才能保证立即停止隐藏。Provider 是同进程静态表，
+     * 直接清即可；文件写入走 su，放后台线程避免卡主线程。
+     */
+    private fun clearHideConfigDirectly() {
+        runCatching {
+            com.kail.location.views.locationshm.LocationShmProvider.setConfig(
+                com.kail.location.inject.utils.LocationShm.PROVIDER_KEY_HIDE_CONFIG, null
+            )
+            com.kail.location.views.locationshm.LocationShmProvider.setConfig(
+                com.kail.location.inject.utils.LocationShm.PROVIDER_KEY_ANTIDETECT_CONFIG, null
+            )
+        }.onFailure { KailLog.e(getApplication(), TAG, "clearHideConfig(provider): ${it.message}") }
+        Thread({
+            runCatching {
+                com.kail.location.utils.ShellUtils.executeCommand(
+                    "mkdir -p /data/kail-loc && chmod 777 /data/kail-loc && " +
+                        "printf 'enabled=0\\n' > /data/kail-loc/hide_config.txt && " +
+                        "chmod 644 /data/kail-loc/hide_config.txt && " +
+                        "printf 'hook_enabled=0\\n' > /data/kail-loc/antidetect_config.txt && " +
+                        "chmod 644 /data/kail-loc/antidetect_config.txt"
+                )
+            }.onFailure { KailLog.e(getApplication(), TAG, "clearHideConfig(file): ${it.message}") }
+        }, "RootAppHideClearConfig").start()
     }
 }

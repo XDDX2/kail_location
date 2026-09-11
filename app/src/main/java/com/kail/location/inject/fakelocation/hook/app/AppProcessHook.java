@@ -78,7 +78,10 @@ public class AppProcessHook {
             if (z2 || z3) {
                 RootHideHook.hook(obj.getClass().getClassLoader());
             }
-            if (z) {
+            // 原生 libc 文件/`/proc/self/maps` 隐藏必须在"隐藏 Root"开启时也生效，
+            // 不能只在"隐藏应用列表"(z) 时启用：否则只开隐藏 Root 时，框架自身的
+            // /data/kail-loc、注入的 .so 会暴露给目标进程（春秋检测 "Found Injects"）。
+            if (z || z3) {
                 LAntiDetect.loadAndInitialize(str, null, null);
                 ArrayList arrayList = new ArrayList();
                 if (listM138 != null) {

@@ -36,17 +36,30 @@ public final class Camera2Hook {
     /** Surfaces produced by ImageReader.getSurface() — never redirected. */
     private static final Set<Surface> readerSurfaces = ConcurrentHashMap.newKeySet();
 
-    /** Single shared drain surface — avoids "Broken pipe" from per-surface |
-     *  SurfaceTexture creation on some camera HALs. */
-    private static final Surface SHARED_DRAIN = createDrain();
+    /**
+     * Single shared drain surface — avoids "Broken pipe" from per-surface
+     * SurfaceTexture creation on some camera HALs.
+     *
+     * <p>The backing {@link SurfaceTexture} MUST be held in a static field:
+     * {@code new Surface(st)} does NOT keep a Java reference to {@code st}, so
+     * if only the Surface is retained the SurfaceTexture is GC'd, its
+     * BufferQueue is released and the Surface becomes "abandoned". A later
+     * {@code new OutputConfiguration(drain)} / camera session then fails with
+     * {@code IllegalArgumentException: Surface was abandoned}, the hook falls
+     * back to the app's real preview surface, and the camera occupies it — so
+     * MediaPlayer can no longer connect ({@code setVideoSurfaceTexture -22})
+     * and the fake video never shows.
+     */
+    private static final SurfaceTexture SHARED_DRAIN_TEXTURE = createDrainTexture();
+    private static final Surface SHARED_DRAIN = new Surface(SHARED_DRAIN_TEXTURE);
 
     /** app surfaces currently redirected, with video playback attached. */
     private static final Set<Surface> redirected = ConcurrentHashMap.newKeySet();
 
-    private static Surface createDrain() {
+    private static SurfaceTexture createDrainTexture() {
         SurfaceTexture st = new SurfaceTexture(0);
         st.setDefaultBufferSize(4096, 3072);
-        return new Surface(st);
+        return st;
     }
 
     private Camera2Hook() {
@@ -239,15 +252,18 @@ public final class Camera2Hook {
                     for (int i = 0; i < list.size(); i++) {
                         Object o = list.get(i);
                         Surface s = (Surface) o.getClass().getMethod("getSurface").invoke(o);
-                        if (!readerSurfaces.contains(s)) {
-                            if (rewritten == null) rewritten = new java.util.ArrayList(list);
-                            Surface drain = drainFor(s);
-                            Class<?> outClz = o.getClass();
-                            // Create a new OutputConfiguration with the drain surface.
-                            Object newOut = outClz.getConstructor(Surface.class).newInstance(drain);
-                            rewritten.set(i, newOut);
-                            if (redirected.add(s)) {
-                                feedSurface(s);
+                        if (s != null && isPreviewSurface(s)) {
+                            boolean first = redirected.add(s);
+                            if (first && !feedSurface(s)) {
+                                redirected.remove(s);
+                            }
+                            if (redirected.contains(s)) {
+                                if (rewritten == null) rewritten = new java.util.ArrayList(list);
+                                Surface drain = drainFor(s);
+                                Class<?> outClz = o.getClass();
+                                // Create a new OutputConfiguration with the drain surface.
+                                Object newOut = outClz.getConstructor(Surface.class).newInstance(drain);
+                                rewritten.set(i, newOut);
                             }
                         }
                     }
@@ -292,14 +308,17 @@ public final class Camera2Hook {
                 for (int i = 0; i < outputs.size(); i++) {
                     Object o = outputs.get(i);
                     Surface s = (Surface) o.getClass().getMethod("getSurface").invoke(o);
-                    if (!readerSurfaces.contains(s)) {
-                        if (rewritten == null) rewritten = new java.util.ArrayList(outputs);
-                        Surface drain = drainFor(s);
-                        Class<?> outClz = o.getClass();
-                        Object newOut = outClz.getConstructor(Surface.class).newInstance(drain);
-                        rewritten.set(i, newOut);
-                        if (redirected.add(s)) {
-                            feedSurface(s);
+                    if (s != null && isPreviewSurface(s)) {
+                        boolean first = redirected.add(s);
+                        if (first && !feedSurface(s)) {
+                            redirected.remove(s);
+                        }
+                        if (redirected.contains(s)) {
+                            if (rewritten == null) rewritten = new java.util.ArrayList(outputs);
+                            Surface drain = drainFor(s);
+                            Class<?> outClz = o.getClass();
+                            Object newOut = outClz.getConstructor(Surface.class).newInstance(drain);
+                            rewritten.set(i, newOut);
                         }
                     }
                 }

@@ -47,16 +47,19 @@ public class RootHideHook {
     /* JADX INFO: renamed from: ֏.֏.ހ.֏.ށ.ހ$֏, reason: contains not printable characters */
     static class HiddenFakelocArtifacts extends ArrayList<String> {
         HiddenFakelocArtifacts() {
+            // 框架自身目录（Java File 钩子 + 原生 libc 钩子共用这份名单）。
             add("/data/kail-loc");
-            add("liblhooker.so");
-            add("liblhooker64.so");
-            add("libfakeloc.so");
-            add("libfakeloc_apphook.so");
-            add("libfakeloc_apphook64.so");
-            add("libfakeloc_init.so");
-            add("libfakeloc_init64.so");
-            add("libfakeloc_initzygote.so");
-            add("libfakeloc_initzygote64.so");
+            add("/data/local/kail-lib");
+            add("/data/system/kail-loc");
+            // 注入器 / dex / 原生库。用"不带版本号、不带扩展名"的片段匹配，
+            // 才能覆盖 liblhooker64_v46.so、libfakeloc_apphook_v46.so、
+            // libantidetect64.so、libkail_native_hook_v46.so 等实际落盘命名。
+            add("kail_inject");
+            add("liblhooker");
+            add("libfakeloc");
+            add("libantidetect");
+            add("libStepSensor");
+            add("libkail_native_hook");
         }
     }
 

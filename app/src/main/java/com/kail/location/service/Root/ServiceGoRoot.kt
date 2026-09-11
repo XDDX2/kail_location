@@ -1678,7 +1678,9 @@ class ServiceGoRoot : Service() {
     }
 
     private fun initRootControlWriter() {
-        mRootControlWriterThread = HandlerThread("ServiceGoRootControlWriter", Process.THREAD_PRIORITY_BACKGROUND)
+        // daemon：进程被系统要求退出时不要让非守护线程卡住 DestroyJavaVM，
+        // 否则会留下"主线程已退出、intent 永远排队"的僵死进程。
+        mRootControlWriterThread = HandlerThread("ServiceGoRootControlWriter", Process.THREAD_PRIORITY_BACKGROUND).apply { isDaemon = true }
         mRootControlWriterThread.start()
         mRootControlWriterHandler = Handler(mRootControlWriterThread.looper)
     }
@@ -1960,7 +1962,8 @@ class ServiceGoRoot : Service() {
     }
 
     private fun initGoLocation() {
-        mLocHandlerThread = HandlerThread(SERVICE_GO_HANDLER_NAME, Process.THREAD_PRIORITY_DEFAULT)
+        // daemon：同 initRootControlWriter，避免进程退出时卡在 DestroyJavaVM。
+        mLocHandlerThread = HandlerThread(SERVICE_GO_HANDLER_NAME, Process.THREAD_PRIORITY_DEFAULT).apply { isDaemon = true }
         mLocHandlerThread.start()
         mLocHandler = object : Handler(mLocHandlerThread.looper) {
             override fun handleMessage(msg: Message) {
