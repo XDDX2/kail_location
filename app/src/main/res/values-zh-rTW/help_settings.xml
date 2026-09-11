@@ -21,7 +21,6 @@
     <string name="help_settings_debug_log">開啟偵錯日誌</string>
     <string name="help_settings_export_log">匯出日誌檔案</string>
     <string name="help_settings_clear_log">清除日誌快取</string>
-    <string name="help_settings_selinux">SELinux 寬容模式開關</string>
     <string name="help_settings_baidu_key">設定百度地圖金鑰</string>
     <string name="help_settings_opencellid_key">設定 OpenCellID API 金鑰</string>
     <string name="help_settings_history_expiration">設定歷史記錄保留時長</string>

@@ -1696,12 +1696,13 @@ public class RootHideHook {
                             }
                             Iterator<String> it6 = antiDetectionFileNameRedirects.keySet().iterator();
                             while (true) {
-                                if (it6.hasNext()) {
-                                    String next6 = it6.next();
-                                    if (strReplace.contains(next6)) {
-                                        strArr[i] = strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6));
-                                        break;
-                                    }
+                                if (!it6.hasNext()) {
+                                    break;
+                                }
+                                String next6 = it6.next();
+                                if (strReplace.contains(next6)) {
+                                    strArr[i] = strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6));
+                                    break;
                                 }
                             }
                         }
@@ -1837,12 +1838,13 @@ public class RootHideHook {
                             }
                             Iterator<String> it6 = antiDetectionFileNameRedirects.keySet().iterator();
                             while (true) {
-                                if (it6.hasNext()) {
-                                    String next6 = it6.next();
-                                    if (strReplace.contains(next6)) {
-                                        list.set(i5, strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6)));
-                                        break;
-                                    }
+                                if (!it6.hasNext()) {
+                                    break;
+                                }
+                                String next6 = it6.next();
+                                if (strReplace.contains(next6)) {
+                                    list.set(i5, strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6)));
+                                    break;
                                 }
                             }
                         }
@@ -2158,12 +2160,13 @@ public class RootHideHook {
                             }
                             Iterator<String> it6 = antiDetectionFileNameRedirects.keySet().iterator();
                             while (true) {
-                                if (it6.hasNext()) {
-                                    String next6 = it6.next();
-                                    if (strReplace.contains(next6)) {
-                                        list.set(i, strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6)));
-                                        break;
-                                    }
+                                if (!it6.hasNext()) {
+                                    break;
+                                }
+                                String next6 = it6.next();
+                                if (strReplace.contains(next6)) {
+                                    list.set(i, strReplace.replace(next6, antiDetectionFileNameRedirects.get(next6)));
+                                    break;
                                 }
                             }
                         }
@@ -2507,12 +2510,13 @@ public class RootHideHook {
                     }
                     Iterator<String> it6 = antiDetectionFileNameRedirects.keySet().iterator();
                     while (true) {
-                        if (it6.hasNext()) {
-                            String next6 = it6.next();
-                            if (strArr[i5].contains(next6)) {
-                                strArr[i5] = strArr[i5].replace(next6, antiDetectionFileNameRedirects.get(next6));
-                                break;
-                            }
+                        if (!it6.hasNext()) {
+                            break;
+                        }
+                        String next6 = it6.next();
+                        if (strArr[i5].contains(next6)) {
+                            strArr[i5] = strArr[i5].replace(next6, antiDetectionFileNameRedirects.get(next6));
+                            break;
                         }
                     }
                 }
@@ -2665,6 +2669,7 @@ public class RootHideHook {
 
     /* JADX INFO: Access modifiers changed from: private */
     public static void log(Object... objArr) {
+        if (!com.kail.location.inject.utils.InjectLog.hookLogEnabled) return;
         com.kail.location.inject.utils.InjectLog.log("RootHideHook", objArr);
     }
 }

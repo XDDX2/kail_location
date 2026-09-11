@@ -26,7 +26,9 @@ public class HiddenApiBypass {
     }
 
     public static void setHiddenApiExemptions(String... signaturePrefixes) throws IllegalAccessException, InvocationTargetException {
-        setHiddenApiExemptionsMethod.invoke(vmRuntime, signaturePrefixes);
+        // 必须包一层 Object[]，否则 String[] 会被当成可变参数展开成 N 个实参，
+        // 触发 "Wrong number of arguments"（方法签名是 setHiddenApiExemptions(String[])）。
+        setHiddenApiExemptionsMethod.invoke(vmRuntime, new Object[]{signaturePrefixes});
     }
 
     public static boolean bypassHiddenApiRestrictions() {
@@ -34,7 +36,7 @@ public class HiddenApiBypass {
             return true;
         }
         try {
-            setHiddenApiExemptions("Landroid/", "Lcom/android/", "Ljava/lang/", "Ldalvik/system/", "Llibcore/io/");
+            setHiddenApiExemptions("Landroid/", "Lcom/android/", "Ljava/lang/", "Ljava/nio/", "Lsun/misc/", "Ldalvik/system/", "Llibcore/io/");
             return true;
         } catch (Throwable th) {
             th.printStackTrace();

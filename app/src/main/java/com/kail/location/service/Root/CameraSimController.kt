@@ -164,6 +164,13 @@ object CameraSimController {
                 "cp ${tmp.absolutePath} $CONFIG_DEST && chmod 644 $CONFIG_DEST && " +
                     "chcon u:object_r:system_file:s0 $CONFIG_DEST 2>/dev/null || true"
             )
+            // Provider 通道（主）：目标进程 CameraHookConfig 优先从 Provider 读。
+            runCatching {
+                com.kail.location.views.locationshm.LocationShmProvider.setConfig(
+                    com.kail.location.inject.utils.LocationShm.PROVIDER_KEY_CAMERA_CONFIG,
+                    if (enabled) json else null
+                )
+            }
 
             if (!enabled) {
                 ShellUtils.executeCommand("rm -f $CONFIG_DEST")

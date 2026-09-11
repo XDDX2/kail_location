@@ -83,7 +83,6 @@ public class RuntimeAntiDetectionHook {
 
     public static String StackTraceElement_getClassName(Object obj) {
         try {
-            log("StackTraceElement_getClassName", obj);
             String strStackTraceElement_getClassName_bak = StackTraceElement_getClassName_bak(obj);
             if (!AntiDetectionServiceManager.getInstance().isAntiDetectionEnabled() || !AntiDetectionServiceManager.getInstance().isFileNameHidingEnabled()) {
                 return strStackTraceElement_getClassName_bak;
@@ -100,7 +99,6 @@ public class RuntimeAntiDetectionHook {
 
     public static String StackTraceElement_getClassName_bak(Object obj) {
         try {
-            log("StackTraceElement_getClassName_bak", obj);
             StringBuffer stringBuffer = new StringBuffer();
             stringBuffer.append("#");
             stringBuffer.append("#");
@@ -121,7 +119,6 @@ public class RuntimeAntiDetectionHook {
 
     public static String StackTraceElement_getClassName_copy(Object obj) {
         try {
-            log("StackTraceElement_getClassName_bak", obj);
             StringBuffer stringBuffer = new StringBuffer();
             stringBuffer.append("#");
             stringBuffer.append("#");
@@ -1049,6 +1046,7 @@ public class RuntimeAntiDetectionHook {
     }
 
     private static void log(Object... objArr) {
+        if (!com.kail.location.inject.utils.InjectLog.hookLogEnabled) return;
         com.kail.location.inject.utils.InjectLog.log("RuntimeAntiDetectionHook", objArr);
     }
 

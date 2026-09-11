@@ -77,10 +77,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         // Root injection mode
         const val KEY_GLOBAL_MODE = "kail_global_mode"
         const val KEY_TARGET_PACKAGES = "kail_target_packages"
-
-        // 注入期间临时将 SELinux 切到宽容模式。开关关闭时 RootDeployer 不会
-        // 调用 setenforce 0，也不会调用 setenforce 1（保持系统原本的 SELinux 状态）。
-        const val KEY_SELINUX_PERMISSIVE = "setting_selinux_permissive"
     }
 
     // 已有 StateFlow（保留）
@@ -196,9 +192,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _targetPackages = MutableStateFlow(prefs.getString(KEY_TARGET_PACKAGES, "com.autonavi.minimap") ?: "com.autonavi.minimap")
     val targetPackages: StateFlow<String> = _targetPackages.asStateFlow()
 
-    private val _selinuxPermissiveEnabled = MutableStateFlow(prefs.getBoolean(KEY_SELINUX_PERMISSIVE, false))
-    val selinuxPermissiveEnabled: StateFlow<Boolean> = _selinuxPermissiveEnabled.asStateFlow()
-
     private val _floatingWindowWidth = MutableStateFlow(prefs.getString(KEY_FLOATING_WINDOW_WIDTH, "300") ?: "300")
     val floatingWindowWidth: StateFlow<String> = _floatingWindowWidth.asStateFlow()
     private val _floatingWindowHeight = MutableStateFlow(prefs.getString(KEY_FLOATING_WINDOW_HEIGHT, "500") ?: "500")
@@ -247,7 +240,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             KEY_STEP_SIM_ENABLED -> _stepSimEnabled.value = sharedPreferences.getBoolean(key, true)
             KEY_GLOBAL_MODE -> _globalMode.value = sharedPreferences.getBoolean(key, true)
             KEY_TARGET_PACKAGES -> _targetPackages.value = sharedPreferences.getString(key, "com.autonavi.minimap") ?: "com.autonavi.minimap"
-            KEY_SELINUX_PERMISSIVE -> _selinuxPermissiveEnabled.value = sharedPreferences.getBoolean(key, false)
             KEY_FLOATING_WINDOW_WIDTH -> _floatingWindowWidth.value = sharedPreferences.getString(key, "300") ?: "300"
             KEY_FLOATING_WINDOW_HEIGHT -> _floatingWindowHeight.value = sharedPreferences.getString(key, "500") ?: "500"
         }

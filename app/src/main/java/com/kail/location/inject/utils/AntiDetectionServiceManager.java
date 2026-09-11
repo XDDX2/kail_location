@@ -1,14 +1,20 @@
 package com.kail.location.inject.utils;
 
-import android.os.RemoteException;
 import java.util.List;
-import com.kail.location.inject.fakelocation.aidl.IMockAntiDetectionManager;
 
+/**
+ * 目标进程读取反检测 / "隐藏应用列表" 配置的入口。
+ *
+ * <p>{@code oem_security} binder 在本机被 SELinux 拦截，已弃用；配置统一走
+ * {@link AntiDetectConfigFile}（Provider 优先 + 文件兜底）。
+ */
 public class AntiDetectionServiceManager {
-    private IMockAntiDetectionManager antiDetectionService;
 
     private static final class Holder {
         static AntiDetectionServiceManager instance = new AntiDetectionServiceManager();
+    }
+
+    private AntiDetectionServiceManager() {
     }
 
     public static AntiDetectionServiceManager getInstance() {
@@ -16,85 +22,37 @@ public class AntiDetectionServiceManager {
     }
 
     public List<String> getHookTargetPackages() {
-        if (getAntiDetectionService() == null) {
-            return null;
-        }
-        try {
-            return this.antiDetectionService.getTargetPackages();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return null;
-        }
+        return AntiDetectConfigFile.getTargetPackages();
     }
 
+    /**
+     * 要隐藏的“文件名片段”。
+     *
+     * <p>不能复用 {@link AntiDetectConfigFile#getDetectedPackages()}：那是**包名**（用于
+     * PackageManagerServiceHook 过滤应用列表）。一旦被 RuntimeAntiDetectionHook 的
+     * File.exists/list 钩子当成路径片段匹配，就会把目标应用自己的文件（路径里天然含
+     * 自己的包名）也一起藏掉，导致它连自己的 APK 都读不到、启动即 ClassNotFoundException。
+     *
+     * <p>Root 文件隐藏由 {@link RootHideHook}（路径重定向）与 LAntiDetect（native）负责，
+     * 这里不再返回包名，返回 null 即让这些 Java 文件钩子成为 no-op。
+     */
     public List<String> getHiddenFileNames() {
-        if (getAntiDetectionService() == null) {
-            return null;
-        }
-        try {
-            return this.antiDetectionService.getDetectedPackages();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return null;
-        }
+        return null;
     }
 
     public List<String> getHookMethodRules() {
-        if (getAntiDetectionService() == null) {
-            return null;
-        }
-        try {
-            return this.antiDetectionService.getScopedPackageRules();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
-
-    public IMockAntiDetectionManager getAntiDetectionService() {
-        if (this.antiDetectionService == null) {
-            try {
-                this.antiDetectionService = IMockAntiDetectionManager.Stub.asInterface(ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_security"));
-            } catch (Throwable th) {
-                th.printStackTrace();
-            }
-        }
-        return this.antiDetectionService;
+        return null;
     }
 
     public boolean isAntiDetectionEnabled() {
-        if (getAntiDetectionService() == null) {
-            return false;
-        }
-        try {
-            return this.antiDetectionService.isPackageManagerHookEnabled();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return false;
-        }
+        return AntiDetectConfigFile.isHookEnabled();
     }
 
     public boolean isFileNameHidingEnabled() {
-        if (getAntiDetectionService() == null) {
-            return false;
-        }
-        try {
-            return this.antiDetectionService.isPackageVisibilityFilteringEnabled();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return false;
-        }
+        return AntiDetectConfigFile.isVisibilityFilterEnabled();
     }
 
     public boolean isHookRulesEnabled() {
-        if (getAntiDetectionService() == null) {
-            return false;
-        }
-        try {
-            return this.antiDetectionService.isPackageFilterEnabled();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return false;
-        }
+        return AntiDetectConfigFile.isFilterEnabled();
     }
 }

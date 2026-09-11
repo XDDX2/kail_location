@@ -1,14 +1,20 @@
 package com.kail.location.inject.utils;
 
-import android.os.RemoteException;
 import java.util.List;
-import com.kail.location.inject.fakelocation.aidl.IHideRootManager;
 
+/**
+ * 目标进程读取"Root与应用隐藏"配置的入口。
+ *
+ * <p>{@code oem_integrity} binder 在本机被 SELinux 拦截（addService/find 均拒），
+ * 已弃用；配置统一走 {@link HideConfigFile}（Provider 优先 + 文件兜底）。
+ */
 public class HideRootServiceManager {
-    private IHideRootManager hideRootService;
 
     private static final class Holder {
         static HideRootServiceManager instance = new HideRootServiceManager();
+    }
+
+    private HideRootServiceManager() {
     }
 
     public static HideRootServiceManager getInstance() {
@@ -16,73 +22,22 @@ public class HideRootServiceManager {
     }
 
     public List<String> getHiddenPackages() {
-        IHideRootManager svc = getHideRootService();
-        if (svc != null) {
-            try {
-                return svc.getHiddenPackages();
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
-        }
-        // binder 不可用（Enforcing 下 find 被 SELinux 拦截）时退到文件通道。
         return HideConfigFile.getPackages();
     }
 
     public List<String> getHiddenProcesses() {
-        if (getHideRootService() == null) {
-            return null;
-        }
-        try {
-            return this.hideRootService.getHiddenProcesses();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
-
-    public IHideRootManager getHideRootService() {
-        if (this.hideRootService == null) {
-            try {
-                this.hideRootService = IHideRootManager.Stub.asInterface(ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_integrity"));
-            } catch (Throwable th) {
-                th.printStackTrace();
-            }
-        }
-        return this.hideRootService;
+        return null;
     }
 
     public boolean isHideRootEnabled() {
-        IHideRootManager svc = getHideRootService();
-        if (svc != null) {
-            try {
-                return svc.isHideRootEnabled();
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
-        }
         return HideConfigFile.isEnabled();
     }
 
     public boolean isHideAppListEnabled() {
-        IHideRootManager svc = getHideRootService();
-        if (svc != null) {
-            try {
-                return svc.isHideAppListEnabled();
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
-        }
         return HideConfigFile.isHideAppListEnabled();
     }
 
+    /** 配置由 App 写 {@link HideConfigFile}（Provider + 文件）驱动，此处无需处理。 */
     public void disableHideRoot() {
-        if (getHideRootService() == null) {
-            return;
-        }
-        try {
-            this.hideRootService.disableHideRoot();
-        } catch (RemoteException e) {
-            e.printStackTrace();
-        }
     }
 }

@@ -282,8 +282,6 @@
     <string name="setting_target_packages">目標應用程式包名</string>
     <string name="setting_target_packages_summary">逗號分隔，僅在全域模式關閉時生效。例：com.autonavi.minimap</string>
     <string name="setting_baidu_key">百度地圖 Key（需重新啟動才會生效）</string>
-    <string name="setting_selinux_permissive">模擬時暫時關閉 SELinux</string>
-    <string name="setting_selinux_permissive_summary">開啟後從開始模擬到停止模擬期間切換為寬容模式（注入、服務註冊與模擬呼叫全部放行），停止模擬後立即恢復強制模式；關閉則完全不改動 SELinux。Android 14/15 上綁定服務被 SELinux 攔截時可打開此項解決</string>
     <string name="setting_enable_log">啟用日誌</string>
     <string name="setting_enable_log_summary">將低頻日誌與關鍵狀態日誌寫入本機檔案</string>
     <string name="setting_enable_debug_log">啟用詳細除錯日誌</string>

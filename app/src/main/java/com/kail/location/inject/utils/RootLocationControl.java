@@ -1,10 +1,13 @@
 package com.kail.location.inject.utils;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.location.Location;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Process;
+import android.os.SharedMemory;
 import android.os.SystemClock;
 import com.kail.location.lib.lhooker.LHooker;
 
@@ -12,6 +15,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,6 +52,25 @@ public final class RootLocationControl {
     private static volatile String lastAckStatus = "started";
     private static volatile long lastAckRefreshMs;
 
+    // ---- Phase 1 共享内存位置传输 ----
+    private static final long SHM_POLL_MS = 50L;
+    private static final long SHM_STALE_MS = 15000L;
+    private static volatile boolean shmReaderStarted;
+    private static volatile ByteBuffer shmBuffer;
+    private static volatile SharedMemory shmShared;
+    private static volatile long lastShmSeq;
+    private static volatile long lastShmSampleMs;
+    private static volatile String shmLastDiag;
+    private static volatile boolean shmFirstReadLogged;
+    // Provider 配置通道（WiFi / 基站）：替代 su 写文件。
+    private static volatile String lastProviderWifi;
+    private static volatile String lastProviderCell;
+    private static volatile String lastProviderStep;
+    private static volatile String lastProviderAllow;
+    private static volatile Boolean lastProviderOnline;
+    private static volatile boolean providerConfigActive;
+    private static volatile boolean providerConfigPollerStarted;
+
     private RootLocationControl() {
     }
 
@@ -57,6 +80,10 @@ public final class RootLocationControl {
             controlPath = RootControlPaths.controlPath(appContext);
             ackPath = RootControlPaths.ackPath(appContext);
         }
+        // Phase 1 共享内存读端：独立线程，随注入常驻，按需重试映射。
+        startShmReader(context);
+        // Provider 配置通道（WiFi/基站）：独立线程，避免 binder 阻塞控制循环。
+        startProviderConfigPoller();
         Thread existing = controlThread;
         if (started && existing != null && existing.isAlive()
                 && System.currentTimeMillis() - lastLoopMs < LOOP_ALIVE_MS) {
@@ -78,11 +105,19 @@ public final class RootLocationControl {
         thread.start();
         writeAck("started", null, null);
         InjectLog.persist(TAG, "started context=", context, " control=", controlPath);
-        // 文件通道白名单：启动时立即应用一次，随后由 loop() 按文件变化持续刷新。
-        applyAllowPackagesFromFile();
+        // 注意：这里（system_server 主线程，注入期间）绝不能做任何 binder 调用。
+        // 白名单/配置的应用交给控制线程 loop() 的 refresh* 完成（首轮即会应用），
+        // 否则 ContentResolver.call 会阻塞主线程，导致整机卡死。
     }
 
     private static void loop() {
+        // 注入窗口（ptrace / LHooker.suspendAll）期间不要发 binder 请求
+        // （文件变化可能触发 Provider 拉取），等注入完成后再开始。
+        try {
+            Thread.sleep(3000L);
+        } catch (InterruptedException ignored) {
+            return;
+        }
         while (true) {
             try {
                 lastLoopMs = System.currentTimeMillis();
@@ -94,6 +129,8 @@ public final class RootLocationControl {
                     lastLength = length;
                     scheduleApply(file);
                 }
+                // 文件变化只作为“App 刚下发配置”的触发器：Provider 在线时立即从
+                // Provider 取（主通道），Provider 不可用时才读文件（兜底）。
                 refreshAllowMockPackagesIfNeeded();
                 refreshWifiMockIfNeeded();
                 refreshCellMockIfNeeded();
@@ -108,6 +145,196 @@ public final class RootLocationControl {
                 }
             }
         }
+    }
+
+    /**
+     * Phase 1 共享内存读端线程（常驻）。
+     *
+     * <p>App 侧 {@code ServiceGoRoot} 把当前位置 seqlock 写入一块 ashmem，并经
+     * {@code LocationShmProvider} 暴露 fd；这里通过 ContentResolver 拿到 fd 后
+     * mmap，每 {@link #SHM_POLL_MS} 读一次最新样本，直接更新
+     * {@link MockLocationHookManager#setMockLocation}。真正的位置派发仍由
+     * {@link MockLocationHookManager} 的 DispatchLoop 按 interval 完成。
+     *
+     * <p>映射策略：App 进程内复用同一块 ashmem，故正常开始/停止只切换 enabled；
+     * 若长时间读不到新样本（App 进程重启换了一块 ashmem），则重新映射自愈。
+     */
+    private static synchronized void startShmReader(Context appContext) {
+        if (shmReaderStarted) return;
+        if (!LocationShm.isAvailable()) {
+            InjectLog.persist(TAG, "shm unavailable; using control-file transport");
+            return;
+        }
+        final Context ctx = appContext;
+        shmReaderStarted = true;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                shmReaderLoop(ctx);
+            }
+        }, "KailLocationShmReader");
+        t.setDaemon(true);
+        t.start();
+        InjectLog.persist(TAG, "shm reader started");
+    }
+
+    private static void shmReaderLoop(Context ctx) {
+        ByteBuffer buf = null;
+        int attempts = 0;
+        int idlePolls = 0;
+        LocationShm.Sample sample = new LocationShm.Sample();
+        // 注入窗口（ptrace / LHooker.suspendAll）期间不要发 binder（get_shm）请求，
+        // 否则可能卡死 system_server。等注入完成后再开始映射。
+        try {
+            Thread.sleep(3000L);
+        } catch (InterruptedException ie) {
+            return;
+        }
+        while (true) {
+            try {
+                if (buf == null) {
+                    buf = openShm(ctx);
+                    if (buf == null) {
+                        attempts++;
+                        Thread.sleep(attempts < 20 ? 300L : 2000L);
+                        continue;
+                    }
+                    attempts = 0;
+                    lastShmSeq = 0L;
+                    shmFirstReadLogged = false;
+                    lastShmSampleMs = SystemClock.elapsedRealtime();
+                    InjectLog.persist(TAG, "shm mapped size=", buf.capacity());
+                }
+                if (!LocationShm.isEnabled(buf)) {
+                    // 会话未运行：低频重映射，等待 App 下一次开始（或 App 重启换区）。
+                    // 退避到 10s，避免 App 已退出时被 Provider 调用反复拉起。
+                    idlePolls++;
+                    Thread.sleep(idlePolls < 20 ? 1000L : 10000L);
+                    ByteBuffer fresh = openShm(ctx);
+                    if (fresh != null) {
+                        buf = fresh;
+                        lastShmSeq = 0L;
+                        shmFirstReadLogged = false;
+                        lastShmSampleMs = SystemClock.elapsedRealtime();
+                        if (LocationShm.isEnabled(fresh)) {
+                            InjectLog.persist(TAG, "shm remapped(idle) enabled=true");
+                        }
+                    }
+                    continue;
+                }
+                idlePolls = 0;
+                long seq = LocationShm.readSample(buf, sample);
+                long now = SystemClock.elapsedRealtime();
+                if (seq > 0L && seq != lastShmSeq) {
+                    lastShmSeq = seq;
+                    lastShmSampleMs = now;
+                    if (!shmFirstReadLogged) {
+                        shmFirstReadLogged = true;
+                        InjectLog.persist(TAG, "shm read first seq=", seq, " lat=", sample.lat, " lng=", sample.lng);
+                    }
+                    applyShmSample(sample);
+                } else if (now - lastShmSampleMs > SHM_STALE_MS) {
+                    // 长时间无新样本：可能 App 进程重启后换了一块 ashmem。
+                    ByteBuffer fresh = openShm(ctx);
+                    if (fresh != null && fresh != buf) {
+                        buf = fresh;
+                        lastShmSeq = 0L;
+                        shmFirstReadLogged = false;
+                    }
+                    lastShmSampleMs = now;
+                }
+                Thread.sleep(SHM_POLL_MS);
+            } catch (InterruptedException ie) {
+                return;
+            } catch (Throwable t) {
+                InjectLog.e(TAG, "shm reader error", t);
+                buf = null;
+                shmBuffer = null;
+                lastShmSeq = 0L;
+                try {
+                    Thread.sleep(1000L);
+                } catch (InterruptedException ignored) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /** 只在失败原因发生变化时输出一次，避免重试期间刷屏。 */
+    private static void shmDiag(String msg) {
+        if (msg != null && msg.equals(shmLastDiag)) return;
+        shmLastDiag = msg;
+        InjectLog.persist(TAG, "shm: ", msg);
+    }
+
+    private static ByteBuffer openShm(Context ctx) {
+        if (ctx == null) return null;
+        try {
+            ContentResolver cr = ctx.getContentResolver();
+            Bundle reply = cr.call(
+                    Uri.parse(LocationShm.PROVIDER_URI),
+                    LocationShm.PROVIDER_METHOD_GET_SHM,
+                    null,
+                    null);
+            if (reply == null) {
+                shmDiag("provider reply null");
+                return null;
+            }
+            reply.setClassLoader(SharedMemory.class.getClassLoader());
+            SharedMemory shared = reply.getParcelable(LocationShm.PROVIDER_KEY_SHM);
+            if (shared == null) {
+                shmDiag("parcelable null");
+                return null;
+            }
+            ByteBuffer buf = shared.mapReadWrite();
+            if (!LocationShm.validate(buf)) {
+                shmDiag("validate failed");
+                try {
+                    shared.close();
+                } catch (Throwable ignored) {
+                }
+                return null;
+            }
+            SharedMemory previous = shmShared;
+            shmShared = shared;
+            shmBuffer = buf;
+            shmLastDiag = null;
+            if (previous != null && previous != shared) {
+                try {
+                    previous.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            return buf;
+        } catch (Throwable t) {
+            shmDiag("open exception " + t);
+            return null;
+        }
+    }
+
+    private static void applyShmSample(LocationShm.Sample s) {
+        try {
+            Location location = new Location(LocationManager.GPS_PROVIDER);
+            location.setLatitude(s.lat);
+            location.setLongitude(s.lng);
+            location.setAltitude(s.alt);
+            location.setBearing((float) s.bearing);
+            location.setSpeed((float) s.speed);
+            location.setAccuracy(s.accuracy > 0.0 ? (float) s.accuracy : 1.0f);
+            location.setTime(System.currentTimeMillis());
+            location.setElapsedRealtimeNanos(SystemClock.elapsedRealtimeNanos());
+            Bundle extras = new Bundle();
+            extras.putString("from", "rocker");
+            location.setExtras(extras);
+            MockLocationHookManager.setMockLocation(location);
+        } catch (Throwable t) {
+            InjectLog.e(TAG, "apply shm sample error", t);
+        }
+    }
+
+    /** Provider 是否在线（主通道）。在线时文件变化只触发 Provider 拉取，不走文件内容。 */
+    private static boolean providerOnline() {
+        return lastProviderOnline != null && lastProviderOnline;
     }
 
     /**
@@ -128,27 +355,137 @@ public final class RootLocationControl {
             }
             lastAllowModified = modified;
             lastAllowLength = length;
-            applyAllowPackagesFromFile();
+            if (providerOnline()) {
+                refreshProviderConfigIfNeeded();
+            } else {
+                applyAllowPackagesFromFile();
+            }
         } catch (Throwable t) {
             InjectLog.e(TAG, "allow mock packages refresh error", t);
         }
     }
 
     /**
-     * 读取白名单文件并刷新到 MockLocationHookManager / MockWifiConfigManager。
+     * 读取白名单（文件通道）并刷新到 MockLocationHookManager / MockWifiConfigManager。
      * enabled=0 或 packages 为空时传 null（= 对所有应用生效，恢复默认行为）。
      */
     private static void applyAllowPackagesFromFile() {
+        applyAllowPackagesConfig(AllowMockPackagesConfigFile.read(), "file");
+    }
+
+    private static void applyAllowPackagesConfig(AllowMockPackagesConfigFile.Config cfg, String source) {
         try {
-            AllowMockPackagesConfigFile.Config cfg = AllowMockPackagesConfigFile.read();
             List<String> pkgs = cfg.enabled && !cfg.packages.isEmpty() ? cfg.packages : null;
             MockLocationHookManager.setAllowMockPackages(pkgs == null ? null : new ArrayList<String>(pkgs));
             MockWifiConfigManager.setAllowMockPackages(pkgs == null ? null : new ArrayList<String>(pkgs));
-            InjectLog.persist(TAG, "allow mock packages applied: enabled=", cfg.enabled,
+            InjectLog.persist(TAG, "allow mock packages applied by ", source, ": enabled=", cfg.enabled,
                     " pkgs=", pkgs == null ? "<all apps>" : pkgs.toString());
         } catch (Throwable t) {
             InjectLog.e(TAG, "allow mock packages apply error", t);
         }
+    }
+
+    /**
+     * Provider 配置通道轮询（主通道）：App 把 WiFi / 基站配置经
+     * {@code LocationShmProvider} 暴露，这里每约 1s 通过
+     * {@code ContentResolver.call("get_config")} 取回并应用，避免 su 写文件与
+     * SELinux 文件权限问题。文件通道仍作为兜底。
+     */
+    private static void refreshProviderConfigIfNeeded() {
+        Context ctx = context;
+        if (ctx == null) return;
+        try {
+            ContentResolver cr = ctx.getContentResolver();
+            Bundle reply = cr.call(
+                    Uri.parse(LocationShm.PROVIDER_URI),
+                    LocationShm.PROVIDER_METHOD_GET_CONFIG,
+                    null,
+                    null);
+            if (reply == null) {
+                if (lastProviderOnline == null || lastProviderOnline) {
+                    lastProviderOnline = false;
+                    InjectLog.persist(TAG, "[provider] get_config -> null（App/provider 未就绪，走文件通道）");
+                }
+                return;
+            }
+            if (lastProviderOnline == null || !lastProviderOnline) {
+                lastProviderOnline = true;
+                InjectLog.persist(TAG, "[provider] get_config online, keys=", reply.keySet());
+            }
+            boolean active = false;
+            String wifi = reply.getString(LocationShm.PROVIDER_KEY_WIFI_CONFIG);
+            if (wifi != null && !wifi.equals(lastProviderWifi)) {
+                lastProviderWifi = wifi;
+                WifiMockConfigFile.Config wc = WifiMockConfigFile.parse(wifi);
+                applyWifiMockConfig(wc, "provider");
+            }
+            String cell = reply.getString(LocationShm.PROVIDER_KEY_CELL_CONFIG);
+            if (cell != null && !cell.equals(lastProviderCell)) {
+                lastProviderCell = cell;
+                CellMockConfigFile.Config cc = CellMockConfigFile.parse(cell);
+                applyCellMockConfig(cc, "provider");
+            }
+            String step = reply.getString(LocationShm.PROVIDER_KEY_STEP_CONFIG);
+            if (step != null && !step.equals(lastProviderStep)) {
+                lastProviderStep = step;
+                applyStepFromProvider(step);
+            }
+            String allow = reply.getString(LocationShm.PROVIDER_KEY_ALLOW_CONFIG);
+            if (allow != null && !allow.equals(lastProviderAllow)) {
+                lastProviderAllow = allow;
+                applyAllowPackagesConfig(AllowMockPackagesConfigFile.parse(allow), "provider");
+            }
+            // 有任一 WiFi/基站配置处于启用态时按 1s 快轮询，否则退避到 5s，
+            // 避免 App 空闲时被每秒唤醒。
+            if (lastProviderWifi != null) {
+                WifiMockConfigFile.Config wc = WifiMockConfigFile.parse(lastProviderWifi);
+                active = wc.enabled && !wc.networks.isEmpty();
+            }
+            if (!active && lastProviderCell != null) {
+                CellMockConfigFile.Config cc = CellMockConfigFile.parse(lastProviderCell);
+                active = cc.enabled && !cc.towers.isEmpty();
+            }
+            providerConfigActive = active;
+        } catch (Throwable t) {
+            // provider 不可用（App 未起 / 无该 provider）时走文件通道。
+            if (lastProviderOnline == null || lastProviderOnline) {
+                lastProviderOnline = false;
+                InjectLog.persist(TAG, "[provider] get_config failed: ", t);
+            }
+        }
+    }
+
+    private static synchronized void startProviderConfigPoller() {
+        if (providerConfigPollerStarted) return;
+        providerConfigPollerStarted = true;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                // 注入窗口（ptrace / LHooker.suspendAll）期间不要发 binder 请求，
+                // 否则可能卡死 system_server。等注入完成后再开始轮询。
+                try {
+                    Thread.sleep(3000L);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+                while (true) {
+                    try {
+                        refreshProviderConfigIfNeeded();
+                        Thread.sleep(providerConfigActive ? 1000L : 5000L);
+                    } catch (InterruptedException ie) {
+                        return;
+                    } catch (Throwable t) {
+                        try {
+                            Thread.sleep(1000L);
+                        } catch (InterruptedException ignored) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }, "KailProviderConfigPoller");
+        t.setDaemon(true);
+        t.start();
     }
 
     /**
@@ -166,27 +503,38 @@ public final class RootLocationControl {
             }
             lastWifiModified = modified;
             lastWifiLength = length;
-            applyWifiMockFromFile();
+            if (providerOnline()) {
+                refreshProviderConfigIfNeeded();
+            } else {
+                applyWifiMockFromFile();
+            }
         } catch (Throwable t) {
             InjectLog.e(TAG, "wifi mock refresh error", t);
         }
     }
 
     /**
-     * 读取 WiFi 模拟文件并刷新到 MockWifiConfigManager。序列与
+     * 读取 WiFi 模拟文件并刷新到 MockWifiConfigManager（文件通道兜底）。
+     */
+    private static void applyWifiMockFromFile() {
+        applyWifiMockConfig(WifiMockConfigFile.read(), "file");
+    }
+
+    /**
+     * 应用 WiFi 模拟配置到 MockWifiConfigManager。序列与
      * MockWifiManagerService.startMockWifi 等价：
      * 设置网络列表/主网络，License 可用时挂 WifiServiceHook 并置开关。
      */
-    private static void applyWifiMockFromFile() {
+    private static void applyWifiMockConfig(WifiMockConfigFile.Config cfg, String source) {
         try {
-            WifiMockConfigFile.Config cfg = WifiMockConfigFile.read();
             if (!cfg.enabled || cfg.networks.isEmpty()) {
                 MockWifiConfigManager.setMockWifiEnabled(false);
-                InjectLog.persist(TAG, "wifi mock disabled by file");
+                InjectLog.persist(TAG, "wifi mock disabled by ", source);
                 return;
             }
             MockWifiConfigManager.setMockWifiNetworks(cfg.networks);
-            MockWifiConfigManager.setPrimaryMockWifiNetwork(cfg.networks.get(0));
+            // 主网络即列表第 0 个（getPrimaryMockWifiNetwork 返回 index 0），
+            // 无需再调用 setPrimaryMockWifiNetwork，否则旧实现会清空其余网络。
             if (LicenseStateManager.isLicenseUsable()
                     && com.kail.location.inject.fakelocation.InjectDex.getApplicationContext() != null) {
                 if (!com.kail.location.inject.fakelocation.hook.system.WifiServiceHook.scanResultsHooked) {
@@ -199,7 +547,7 @@ public final class RootLocationControl {
                 }
                 MockWifiConfigManager.setMockWifiEnabled(true);
             }
-            InjectLog.persist(TAG, "wifi mock applied: enabled=1 networks=", cfg.networks.size());
+            InjectLog.persist(TAG, "wifi mock applied by ", source, ": enabled=1 networks=", cfg.networks.size());
         } catch (Throwable t) {
             InjectLog.e(TAG, "wifi mock apply error", t);
         }
@@ -220,24 +568,34 @@ public final class RootLocationControl {
             }
             lastCellModified = modified;
             lastCellLength = length;
-            applyCellMockFromFile();
+            if (providerOnline()) {
+                refreshProviderConfigIfNeeded();
+            } else {
+                applyCellMockFromFile();
+            }
         } catch (Throwable t) {
             InjectLog.e(TAG, "cell mock refresh error", t);
         }
     }
 
     /**
-     * 读取基站模拟文件并刷新到 MockLocationHookManager。序列与 App 侧
+     * 读取基站模拟文件并刷新到 MockLocationHookManager（文件通道兜底）。
+     */
+    private static void applyCellMockFromFile() {
+        applyCellMockConfig(CellMockConfigFile.read(), "file");
+    }
+
+    /**
+     * 应用基站模拟配置到 MockLocationHookManager。序列与 App 侧
      * applyCellMockOnInjection（binder 路径）等价：
      * 置小区列表 + scoped 块列表（只放行基站 "e" 作用域）+ 打开 master mock +
      * seed 一个基准位置（供 CellInfoFactory/onCellLocationChanged 取坐标）。
      */
-    private static void applyCellMockFromFile() {
+    private static void applyCellMockConfig(CellMockConfigFile.Config cfg, String source) {
         try {
-            CellMockConfigFile.Config cfg = CellMockConfigFile.read();
             if (!cfg.enabled || cfg.towers.isEmpty()) {
                 MockLocationHookManager.setMockCells(null);
-                InjectLog.persist(TAG, "cell mock disabled by file");
+                InjectLog.persist(TAG, "cell mock disabled by ", source);
                 return;
             }
             MockLocationHookManager.setMockCells(cfg.towers);
@@ -264,7 +622,7 @@ public final class RootLocationControl {
             extras.putString("from", "loc");
             loc.setExtras(extras);
             MockLocationHookManager.setMockLocation(loc);
-            InjectLog.persist(TAG, "cell mock applied: towers=", cfg.towers.size(),
+            InjectLog.persist(TAG, "cell mock applied by ", source, ": towers=", cfg.towers.size(),
                     " anchor=", baseLat, ",", baseLng);
         } catch (Throwable t) {
             InjectLog.e(TAG, "cell mock apply error", t);
@@ -356,6 +714,44 @@ public final class RootLocationControl {
         InjectLog.persist(TAG, "applied lat=", control.lat, " lng=", control.lng,
                 " interval=", control.intervalMs, " step=", lastStepStatus,
                 " synth=", NativeStepHook.getStepSynthEvents());
+    }
+
+    /** 从 Provider 的 step_config 文本应用步频模拟（不依赖控制文件）。 */
+    private static void applyStepFromProvider(String text) {
+        try {
+            java.util.Map<String, String> v = new java.util.HashMap<>();
+            for (String line : text.split("\n")) {
+                int idx = line.indexOf('=');
+                if (idx > 0) {
+                    v.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim());
+                }
+            }
+            Control c = new Control();
+            c.enabled = true;
+            c.stepEnabled = "1".equals(v.get("step_enabled")) || "true".equalsIgnoreCase(v.get("step_enabled"));
+            c.stepSpm = parseFloat(v.get("step_spm"), 120.0f);
+            c.stepMode = parseInt(v.get("step_mode"), 0);
+            c.stepScheme = parseInt(v.get("step_scheme"), 0);
+            applyStepControl(c);
+        } catch (Throwable t) {
+            InjectLog.e(TAG, "step config apply (provider) error", t);
+        }
+    }
+
+    private static float parseFloat(String value, float fallback) {
+        try {
+            return value == null ? fallback : Float.parseFloat(value);
+        } catch (Throwable t) {
+            return fallback;
+        }
+    }
+
+    private static int parseInt(String value, int fallback) {
+        try {
+            return value == null ? fallback : Integer.parseInt(value);
+        } catch (Throwable t) {
+            return fallback;
+        }
     }
 
     private static void applyStepControl(Control control) {

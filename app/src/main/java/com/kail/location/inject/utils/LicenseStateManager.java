@@ -5,8 +5,7 @@ package com.kail.location.inject.utils;
  *
  * The upstream framework verified each enabled feature against a remote
  * license server at {@code vef.api.fakeloc.cc} and gated controller-side
- * setters in {@link com.kail.location.inject.fakelocation.service.MockLocationManagerService}
- * (and friends) on a successful round-trip. The kail rebrand replaces that
+ * setters on a successful round-trip. The kail rebrand replaces that
  * with a no-op authorization that always reports "usable" — host-package
  * signature verification handled by {@link PackageSignatureVerifier} and
  * {@code fakeloc_common.h::verifyReleaseSignature} is the only gate left.

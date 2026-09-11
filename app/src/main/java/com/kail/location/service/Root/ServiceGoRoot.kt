@@ -12,17 +12,17 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Message
-import android.os.Parcel
 import android.os.Process
+import android.os.SharedMemory
 import android.os.SystemClock
 import android.provider.Settings
+import android.system.OsConstants
 import androidx.preference.PreferenceManager
 import com.kail.location.R
 import com.kail.location.geo.GeoPredict
-import com.kail.location.inject.fakelocation.aidl.IMockLocationManager
 import com.kail.location.inject.utils.HideConfigFile
+import com.kail.location.inject.utils.LocationShm
 import com.kail.location.inject.utils.RootControlPaths
-import com.kail.location.inject.utils.ServiceManagerBridge
 import com.kail.location.root.NativeSensorHook
 import com.kail.location.service.Developer.MockLocationProvider
 import com.kail.location.utils.GoUtils
@@ -38,9 +38,11 @@ import com.kail.location.viewmodels.JoystickViewModel
 import com.kail.location.viewmodels.SettingsViewModel
 import com.kail.location.views.joystick.JoystickWindowManager
 import com.kail.location.views.locationpicker.LocationPickerActivity
+import com.kail.location.views.locationshm.LocationShmProvider
 import java.io.BufferedWriter
 import java.io.InputStream
 import java.io.OutputStreamWriter
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -131,16 +133,16 @@ class ServiceGoRoot : Service() {
     @Volatile private var lastStepAckLogMs: Long = 0L
     @Volatile private var stepAckReadInFlight: Boolean = false
 
+    /**
+     * Phase 1 共享内存位置传输：App 侧持有 ashmem 与映射，每 tick 把当前位置
+     * seqlock 写入；system_server 侧经 LocationShmProvider 拿到 fd 后 mmap 读取。
+     * 任一环节失败都为 null，[pushLocationToInjection] 自动回退控制文件通道。
+     */
+    @Volatile private var locationShmShared: SharedMemory? = null
+    @Volatile private var locationShmBuffer: ByteBuffer? = null
+
     /** Drives Android's standard test-provider mechanism. Same code Developer mode uses. */
     private val mMockLocationProvider by lazy { MockLocationProvider(this, mLocManager) }
-
-    /**
-     * Cached binder into the FakeLocation injection layer. Resolved after
-     * RootDeployer.ensureBaseline runs kail_inject on system_server. When
-     * non-null, location updates go through it; otherwise the service falls
-     * back to [mMockLocationProvider].
-     */
-    private var mockLocService: IMockLocationManager? = null
 
     /**
      * Target-app allow-list driven by the "独立模拟" (Independent Simulation)
@@ -185,12 +187,6 @@ class ServiceGoRoot : Service() {
 
     /** Packages the hide features apply to. Empty means "no targets". */
     private var pendingHidePackages: List<String> = emptyList()
-
-    /** Cached binder into the FakeLocation hide-root layer (oem_integrity). */
-    private var hideRootService: com.kail.location.inject.fakelocation.aidl.IHideRootManager? = null
-
-    /** Cached binder into the FakeLocation anti-detection layer (oem_security). */
-    private var antiDetectionService: com.kail.location.inject.fakelocation.aidl.IMockAntiDetectionManager? = null
 
     /**
      * WiFi / cell networks selected in the UI for spoofing. Populated from the
@@ -252,7 +248,9 @@ class ServiceGoRoot : Service() {
         const val CONTROL_APPEND_ROUTE = ServiceConstants.CONTROL_APPEND_ROUTE
         const val CONTROL_SET_STEP = "set_step"
         const val CONTROL_STOP_WIFI = "stop_wifi"
+        const val CONTROL_SET_WIFI = "set_wifi"
         const val CONTROL_STOP_CELL = "stop_cell"
+        const val CONTROL_SET_CELL = "set_cell"
         const val CONTROL_SET_ALLOW_PACKAGES = "set_allow_packages"
         const val EXTRA_ALLOW_PACKAGES = "EXTRA_ALLOW_PACKAGES"
         const val CONTROL_SET_HIDE = "set_hide"
@@ -276,11 +274,6 @@ class ServiceGoRoot : Service() {
         var isRunning: Boolean = false
             private set
 
-        // oem_wifi (IMockWifiManager) raw-transaction constants.
-        private const val WIFI_DESCRIPTOR = "com.kail.location.aidl.IMockWifiManager"
-        private const val TXN_START_MOCK_WIFI = 2
-        private const val TXN_STOP_MOCK_WIFI = 3
-        private const val TXN_SET_MOCK_WIFI_NETWORKS = 9
         private val ROOT_CONTROL_SESSION_SEQ = AtomicLong(0L)
         private val ROOT_CONTROL_ACTIVE_SESSION = AtomicLong(0L)
         private val ROOT_CONTROL_LOCK = Any()
@@ -331,18 +324,6 @@ class ServiceGoRoot : Service() {
         mNotificationHelper.startForegroundIfReady()
 
         if (intent != null) {
-            // "临时宽容模式"开关：开启后从本模拟会话开始到 onDestroy 停止期间，
-            // 保持 SELinux=Permissive。注入窗口（ensureBaseline/kail_inject）内的
-            // addService、以及会话期间 App 侧每 250ms 的 find/binder IPC 全部放行，
-            // 无需依赖文件通道；停止模拟时由 onDestroy 统一 setenforce 1 恢复强制。
-            val permissiveDuringMock = PreferenceManager.getDefaultSharedPreferences(this)
-                .getBoolean(SettingsViewModel.KEY_SELINUX_PERMISSIVE, false)
-            if (permissiveDuringMock) {
-                runCatching { ShellUtils.executeCommand("setenforce 0") }
-                    .onFailure { KailLog.e(this, TAG, "mock session setenforce 0: ${it.message}") }
-                KailLog.i(this, TAG, "mock session: SELinux permissive ON (setting_selinux_permissive)")
-            }
-
             modeWifiOnly = intent.getBooleanExtra(EXTRA_WIFI_ONLY, false)
             modeCellOnly = intent.getBooleanExtra(EXTRA_CELL_ONLY, false)
             modeHideOnly = intent.getBooleanExtra(EXTRA_HIDE_ONLY, false)
@@ -498,6 +479,7 @@ class ServiceGoRoot : Service() {
             rootControlActive = false
             rootControlLatestWrite = null
             rootControlWriterScheduled = false
+            disableLocationShm()
             if (this::mLocHandler.isInitialized) mLocHandler.removeCallbacksAndMessages(null)
             if (this::mLocHandlerThread.isInitialized) mLocHandlerThread.quitSafely()
             if (this::mRootControlWriterHandler.isInitialized) mRootControlWriterHandler.removeCallbacksAndMessages(null)
@@ -513,7 +495,6 @@ class ServiceGoRoot : Service() {
                 stopMockLocationOnInjection(retry = false, rootControlSession = stoppingRootControlSession)
                 stopHideOnInjection(retry = false)
                 RootDeployer.revokeMockLocationAppOps(applicationContext)
-                runCatching { ShellUtils.executeCommand("setenforce 1") }
                 recordCleanupState()
                 if (nativeHookReady) {
                     runCatching { NativeSensorHook.nativeSetMocking(0) }
@@ -568,20 +549,10 @@ class ServiceGoRoot : Service() {
             }.onFailure { KailLog.e(this, TAG, "stop_wifi: ${it.message}") }
 
             CONTROL_STOP_CELL -> runCatching {
-                // Stop only cell spoofing. Clear the mock cells and the scoped
-                // block-list, and turn the master mock switch back off (it was
-                // only on to arm the telephony hook).
-                runCatching {
-                    resolveMockLocService()?.let {
-                        it.setMockCells(null)
-                        it.setSafeApps(null)
-                        it.stopMockLocation()
-                        it.setMockGpsStatus(false)
-                    }
-                }
+                // Stop only cell spoofing. Clearing the cell file (enabled=0) makes
+                // system_server 的 applyCellMockConfig 复位 setMockCells/setSafeApps。
                 modeCellOnly = false
                 pendingCellList = emptyList()
-                // 文件通道兜底：Binder 失败时也要清空注入层的模拟小区。
                 writeCellMockFile(emptyList())
                 KailLog.i(this, TAG, "Cell mock stopped via control")
                 if (!isAnyMockActive()) stopSelf()
@@ -594,6 +565,50 @@ class ServiceGoRoot : Service() {
                 Thread({ applyAllowPackages(pkgs) }, "ServiceGoRootAllowPkgs").start()
             }.onFailure { KailLog.e(this, TAG, "set_allow_packages: ${it.message}") }
 
+            CONTROL_SET_WIFI -> runCatching {
+                // 模拟进行中动态更新 WiFi 列表（Picker 添加后立即生效）。
+                val list = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(
+                        EXTRA_WIFI_LIST, com.kail.location.models.WifiInfo::class.java
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra<com.kail.location.models.WifiInfo>(EXTRA_WIFI_LIST)
+                }
+                if (list != null) {
+                    pendingWifiList = list
+                    if (list.isEmpty()) {
+                        runCatching { writeWifiMockFile(emptyList()) }
+                    } else {
+                        // 重新下发文件 + Provider + binder，off main thread。
+                        Thread({ applyWifiMockOnInjection() }, "ServiceGoRootSetWifi").start()
+                    }
+                    KailLog.i(this, TAG, "set_wifi: ${list.size} networks")
+                }
+            }.onFailure { KailLog.e(this, TAG, "set_wifi: ${it.message}") }
+
+            CONTROL_SET_CELL -> runCatching {
+                // 模拟进行中动态更新基站列表（页面内添加后立即生效）。
+                val list = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(
+                        EXTRA_CELL_LIST, com.kail.location.models.CellInfo::class.java
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra<com.kail.location.models.CellInfo>(EXTRA_CELL_LIST)
+                }
+                if (list != null) {
+                    pendingCellList = list
+                    if (list.isEmpty()) {
+                        writeCellMockFile(emptyList())
+                    } else {
+                        // 重新下发 Provider + 文件，off main thread。
+                        Thread({ applyCellMockOnInjection() }, "ServiceGoRootSetCell").start()
+                    }
+                    KailLog.i(this, TAG, "set_cell: ${list.size} towers")
+                }
+            }.onFailure { KailLog.e(this, TAG, "set_cell: ${it.message}") }
+
             CONTROL_SET_HIDE -> runCatching {
                 hideRootEnabled = intent.getBooleanExtra(EXTRA_HIDE_ROOT, false)
                 hideAppListEnabled = intent.getBooleanExtra(EXTRA_HIDE_APPLIST, false)
@@ -605,10 +620,16 @@ class ServiceGoRoot : Service() {
             CONTROL_STOP_HIDE -> runCatching {
                 hideRootEnabled = false
                 hideAppListEnabled = false
-                stopHideOnInjection()
-                pendingHidePackages = emptyList()
-                KailLog.i(this, TAG, "Hide stopped via control")
-                if (!isAnyMockActive()) stopSelf()
+                // stopHideOnInjection 里全是阻塞的 root shell 调用（写配置 + 逐个
+                // `am force-stop`）。onStartCommand 在主线程，同步执行会卡住 UI →
+                // ANR，表现出来就是"点停止隐藏没反应"。放到后台线程执行。
+                Thread({
+                    runCatching { stopHideOnInjection() }
+                        .onFailure { KailLog.e(this, TAG, "stopHideOnInjection: ${it.message}") }
+                    pendingHidePackages = emptyList()
+                    KailLog.i(this, TAG, "Hide stopped via control")
+                    if (!isAnyMockActive()) stopSelf()
+                }, "ServiceGoRootStopHide").start()
             }.onFailure { KailLog.e(this, TAG, "stop_hide: ${it.message}") }
 
             CONTROL_SEEK -> {
@@ -733,23 +754,10 @@ class ServiceGoRoot : Service() {
             return
         }
 
-        // Primary path — the FakeLocation step sensor mock via the
-        // oem_location binder (runs inside system_server, hooks
-        // libsensorservice's global sensor stream). setStepSpeed takes
-        // steps-per-second; the UI cadence is in steps-per-minute.
-        runCatching {
-            val svc = resolveMockLocService()
-            if (svc != null) {
-                if (stepEnabled) {
-                    svc.setStepSpeed(stepCadence / 60f)
-                    svc.startStepSensorMock()
-                    KailLog.i(this, TAG, "FakeLocation step mock started, spm=$stepCadence (sps=${stepCadence / 60f})")
-                } else {
-                    svc.stopStepSensorMock()
-                    KailLog.i(this, TAG, "FakeLocation step mock stopped")
-                }
-            }
-        }.onFailure { KailLog.e(this, TAG, "applyStepSimulation (binder): ${it.message}") }
+        // Step mock 走控制文件通道：step_enabled/step_spm/step_mode/step_scheme
+        // 由 buildRootLocationControlContent 写入，system_server 的
+        // RootLocationControl.applyStepControl 直接驱动 MockStepSensorManager，
+        // 不再依赖被 SELinux 拦截的 oem_location binder。
 
         // Secondary best-effort path — the in-app NativeSensorHook. Only does
         // anything when the SO is loaded into the consuming process (Xposed/
@@ -785,26 +793,6 @@ class ServiceGoRoot : Service() {
     //     lands; harmless if the inject path also runs.
     // ------------------------------------------------------------------
 
-    private fun resolveMockLocService(): IMockLocationManager? {
-        mockLocService?.let { return it }
-        val binder = runCatching {
-            ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_location")
-        }.getOrNull() ?: return null
-        return runCatching { IMockLocationManager.Stub.asInterface(binder) }.getOrNull()?.also {
-            mockLocService = it
-            KailLog.i(this, TAG, "FakeLocation mock-location binder online")
-        }
-    }
-
-    /** Like [resolveMockLocService] but retries while the inject finishes registering. */
-    private fun resolveMockLocServiceWithRetry(): IMockLocationManager? {
-        repeat(10) { index ->
-            resolveMockLocService()?.let { return it }
-            if (index < 9) runCatching { Thread.sleep(300) }
-        }
-        return null
-    }
-
     private fun isCurrentGeneration(generation: Int): Boolean {
         return isRunning && generation == startGeneration
     }
@@ -829,33 +817,10 @@ class ServiceGoRoot : Service() {
      */
     private fun applyAllowPackages(pkgs: List<String>) {
         val list = ArrayList(pkgs)
-        // 文件通道先行：SELinux Enforcing 下 oem_location/oem_wifi binder 注册与
-        // find 均被拦截，setAllowMockPackages 只能通过 /data/kail-loc/
-        // allow_mock_packages.txt 被 system_server 内的 RootLocationControl 轮询
-        // 生效。文件通道始终写（binder 可用时值一致，无副作用），是主通道。
+        // 文件通道（主通道）：SELinux Enforcing 下 oem_location/oem_wifi binder
+        // 注册与 find 均被拦截，白名单通过 /data/kail-loc/allow_mock_packages.txt
+        // 被 system_server 内的 RootLocationControl 轮询并直接 setAllowMockPackages。
         writeAllowMockPackagesFile(list)
-        // oem_location (covers location, GNSS, cells — all gated by
-        // MockLocationHookManager.isAllowMockPackage).
-        runCatching {
-            resolveMockLocService()?.setAllowMockPackages(if (list.isEmpty()) null else list)
-        }.onFailure { KailLog.e(this, TAG, "setAllowMockPackages(loc): ${it.message}") }
-        // oem_wifi (MockWifiConfigManager.setAllowMockPackages, code 7).
-        runCatching {
-            val binder = resolveMockWifiBinder()
-            if (binder != null) {
-                val data = Parcel.obtain()
-                val reply = Parcel.obtain()
-                try {
-                    data.writeInterfaceToken(WIFI_DESCRIPTOR)
-                    if (list.isEmpty()) data.writeStringList(null) else data.writeStringList(list)
-                    binder.transact(7, data, reply, 0) // setAllowMockPackages
-                    reply.readException()
-                } finally {
-                    reply.recycle()
-                    data.recycle()
-                }
-            }
-        }.onFailure { KailLog.e(this, TAG, "setAllowMockPackages(wifi): ${it.message}") }
         KailLog.i(this, TAG, "allowMockPackages applied: ${if (list.isEmpty()) "<all apps>" else list.joinToString()}")
 
         // Client-side location/cell mirrors install in the target process.
@@ -883,11 +848,14 @@ class ServiceGoRoot : Service() {
         } else {
             "enabled=1\npackages=${pkgs.joinToString(",")}\n"
         }
+        // Provider 通道（主）：system_server 直接 call 取；文件通道兜底。
+        runCatching { LocationShmProvider.setConfig(LocationShm.PROVIDER_KEY_ALLOW_CONFIG, content) }
+            .onFailure { KailLog.e(this, TAG, "setAllowConfig(provider): ${it.message}") }
         val cmd = "mkdir -p /data/kail-loc && chmod 777 /data/kail-loc && " +
             "printf '%s' ${shellSingleQuote(content)} > /data/kail-loc/allow_mock_packages.txt && chmod 644 /data/kail-loc/allow_mock_packages.txt"
         runCatching { ShellUtils.executeCommand(cmd) }
             .onFailure { KailLog.e(this, TAG, "writeAllowMockPackagesFile: ${it.message}") }
-        KailLog.i(this, TAG, "allow mock packages file written: enabled=${if (pkgs.isEmpty()) 0 else 1} pkgs=${if (pkgs.isEmpty()) "-" else pkgs.joinToString()}")
+        KailLog.i(this, TAG, "allow mock packages written: enabled=${if (pkgs.isEmpty()) 0 else 1} pkgs=${if (pkgs.isEmpty()) "-" else pkgs.joinToString()} (provider+file)")
     }
 
     // ------------------------------------------------------------------
@@ -905,46 +873,6 @@ class ServiceGoRoot : Service() {
     // Hooks only install in a process AFTER it has been app-hook-injected, so
     // we inject every selected package once the config is pushed.
     // ------------------------------------------------------------------
-
-    private fun resolveHideRootService(retry: Boolean = true): com.kail.location.inject.fakelocation.aidl.IHideRootManager? {
-        hideRootService?.let { return it }
-        val attempts = if (retry) 10 else 1
-        repeat(attempts) { index ->
-            val binder = runCatching {
-                ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_integrity")
-            }.getOrNull()
-            if (binder != null) {
-                return runCatching {
-                    com.kail.location.inject.fakelocation.aidl.IHideRootManager.Stub.asInterface(binder)
-                }.getOrNull()?.also {
-                    hideRootService = it
-                    KailLog.i(this, TAG, "FakeLocation hide-root binder online")
-                }
-            }
-            if (retry && index < attempts - 1) runCatching { Thread.sleep(300) }
-        }
-        return null
-    }
-
-    private fun resolveAntiDetectionService(retry: Boolean = true): com.kail.location.inject.fakelocation.aidl.IMockAntiDetectionManager? {
-        antiDetectionService?.let { return it }
-        val attempts = if (retry) 10 else 1
-        repeat(attempts) { index ->
-            val binder = runCatching {
-                ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_security")
-            }.getOrNull()
-            if (binder != null) {
-                return runCatching {
-                    com.kail.location.inject.fakelocation.aidl.IMockAntiDetectionManager.Stub.asInterface(binder)
-                }.getOrNull()?.also {
-                    antiDetectionService = it
-                    KailLog.i(this, TAG, "FakeLocation anti-detection binder online")
-                }
-            }
-            if (retry && index < attempts - 1) runCatching { Thread.sleep(300) }
-        }
-        return null
-    }
 
     /**
      * 把隐藏配置写进文件通道（/data/kail-loc/hide_config.txt）。
@@ -966,7 +894,10 @@ class ServiceGoRoot : Service() {
             "printf '%s' ${shellSingleQuote(content)} > ${HideConfigFile.PATH} && chmod 644 ${HideConfigFile.PATH}"
         runCatching { ShellUtils.executeCommand(cmd) }
             .onFailure { KailLog.e(this, TAG, "writeHideConfigFile: ${it.message}") }
-        KailLog.i(this, TAG, "hide config file written: enabled=$enabled pkgs=${if (enabled) pendingHidePackages.joinToString() else "-"}")
+        // Provider 通道（主）：目标进程的 HideConfigFile 会优先从 Provider 读。
+        runCatching { LocationShmProvider.setConfig(LocationShm.PROVIDER_KEY_HIDE_CONFIG, content) }
+            .onFailure { KailLog.e(this, TAG, "setHideConfig(provider): ${it.message}") }
+        KailLog.i(this, TAG, "hide config written: enabled=$enabled pkgs=${if (enabled) pendingHidePackages.joinToString() else "-"} (provider+file)")
     }
 
     /**
@@ -980,10 +911,16 @@ class ServiceGoRoot : Service() {
      */
     private fun writeAntiDetectConfigFile(enabled: Boolean) {
         val content = if (enabled) {
+            // detected_packages = "要从目标应用的列表里移除的包"，即**其它已安装应用**。
+            // 绝不能填目标应用自身：PackageManagerServiceHook 会把 detected 包从
+            // getInstalledPackages/queryIntentActivities 结果里移除，RuntimeAntiDetectionHook
+            // 还会把 detected 当文件路径片段隐藏文件。填成目标应用会导致它把自己藏掉——
+            // 连自己的 APK 都读不到，直接 ClassNotFoundException 打不开。
+            val hiddenPackages = collectOtherInstalledPackages()
             "hook_enabled=1\n" +
                 "filter_enabled=1\n" +
                 "visibility_filter=1\n" +
-                "detected_packages=${pendingHidePackages.joinToString(",")}\n" +
+                "detected_packages=${hiddenPackages.joinToString(",")}\n" +
                 "target_packages=${pendingHidePackages.joinToString(",")}\n"
         } else {
             "hook_enabled=0\n"
@@ -992,7 +929,31 @@ class ServiceGoRoot : Service() {
             "printf '%s' ${shellSingleQuote(content)} > /data/kail-loc/antidetect_config.txt && chmod 644 /data/kail-loc/antidetect_config.txt"
         runCatching { ShellUtils.executeCommand(cmd) }
             .onFailure { KailLog.e(this, TAG, "writeAntiDetectConfigFile: ${it.message}") }
-        KailLog.i(this, TAG, "antidetect config file written: enabled=$enabled targets=${if (enabled) pendingHidePackages.joinToString() else "-"}")
+        // Provider 通道（主）：InjectDex 的轮询器会优先从 Provider 读。
+        runCatching { LocationShmProvider.setConfig(LocationShm.PROVIDER_KEY_ANTIDETECT_CONFIG, content) }
+            .onFailure { KailLog.e(this, TAG, "setAntiDetectConfig(provider): ${it.message}") }
+        KailLog.i(this, TAG, "antidetect config written: enabled=$enabled targets=${if (enabled) pendingHidePackages.joinToString() else "-"} (provider+file)")
+    }
+
+    /**
+     * "隐藏应用列表"要藏掉的包 = 本机已安装的**第三方应用**，去掉目标应用自身。
+     * 这些包会被 PackageManagerServiceHook 从目标应用的 getInstalledPackages /
+     * queryIntentActivities 等结果里移除，从而对目标应用隐藏"其它应用"。
+     */
+    private fun collectOtherInstalledPackages(): List<String> {
+        return runCatching {
+            val targets = pendingHidePackages.toSet()
+            packageManager.getInstalledApplications(0)
+                .asSequence()
+                .filter { (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
+                .map { it.packageName }
+                .filter { it.isNotEmpty() && it !in targets }
+                .distinct()
+                .toList()
+        }.getOrElse {
+            KailLog.w(this, TAG, "collectOtherInstalledPackages failed: ${it.message}")
+            emptyList()
+        }
     }
 
     /**
@@ -1011,36 +972,9 @@ class ServiceGoRoot : Service() {
         // /data/kail-loc/antidetect_config.txt 来安装 PackageManagerServiceHook。
         writeAntiDetectConfigFile(hideAppListEnabled && hideRootEnabled && pendingHidePackages.isNotEmpty())
 
-        val svc = resolveHideRootService()
-        if (svc != null) {
-            val pkgs = ArrayList(pendingHidePackages)
-            runCatching {
-                // refreshHideRootEnabled flips the master switch on only when the
-                // license is usable; pair it with disableHideRoot when turning off.
-                if (hideRootEnabled && pkgs.isNotEmpty()) {
-                    svc.setHiddenPackages(pkgs)
-                    svc.setHideAppListEnabled(hideAppListEnabled)
-                    svc.refreshHideRootEnabled()
-                } else {
-                    svc.disableHideRoot()
-                    svc.setHideAppListEnabled(false)
-                    svc.setHiddenPackages(null)
-                    svc.setHiddenProcesses(null)
-                }
-                KailLog.i(
-                    this, TAG,
-                    "hide config pushed: hideRoot=$hideRootEnabled hideAppList=$hideAppListEnabled pkgs=${pkgs.joinToString()}"
-                )
-            }.onFailure { KailLog.e(this, TAG, "push hide config: ${it.message}") }
-        } else {
-            // SELinux Enforcing 下 find 被拦，binder 不可解析：配置已走文件通道，
-            // 这里不 return，目标进程注入仍要继续，否则 Hook 装不上去。
-            KailLog.w(this, TAG, "oem_integrity binder not online yet（已走文件通道写配置，继续注入目标进程）")
-        }
-
-        // Hooks only fire in an app process after it has been app-hook-injected.
-        // 注：这段不能放在 binder 分支内——binder 不可用时也必须注入，
-        // 目标进程的 RootHideHook 会改读 hide_config.txt（文件通道）判断开关。
+        // Provider + 文件通道已下发（hide_config / antidetect_config）。
+        // 目标进程的 RootHideHook / PackageManagerServiceHook 会读取；
+        // 然后注入目标进程让 Hook 装上。
         if (hideRootEnabled) {
             for (pkg in pendingHidePackages) {
                 runCatching { RootDeployer.injectAppProcess(applicationContext, pkg) }
@@ -1052,28 +986,7 @@ class ServiceGoRoot : Service() {
     private fun stopHideOnInjection(retry: Boolean = true) {
         writeHideConfigFile(false)
         writeAntiDetectConfigFile(false)
-        val svc = resolveHideRootService(retry)
-        val pkgsToRestart = pendingHidePackages.ifEmpty {
-            runCatching { svc?.hiddenPackages ?: emptyList() }.getOrDefault(emptyList())
-        }.toList()
-        runCatching {
-            svc?.let {
-                it.disableHideRoot()
-                it.setHideAppListEnabled(false)
-                it.setHiddenPackages(null)
-                it.setHiddenProcesses(null)
-            }
-        }.onFailure { KailLog.e(this, TAG, "stopHideOnInjection: ${it.message}") }
-        runCatching {
-            resolveAntiDetectionService(retry)?.let {
-                it.disablePackageManagerHook()
-                it.setPackageFilterEnabled(false)
-                it.setPackageVisibilityFilterEnabled(false)
-                it.setTargetPackages(null)
-                it.setDetectedPackages(null)
-                it.setScopedPackageRules(null)
-            }
-        }.onFailure { KailLog.e(this, TAG, "stopAntiDetectionOnInjection: ${it.message}") }
+        val pkgsToRestart = pendingHidePackages.toList()
         if (pkgsToRestart.isNotEmpty()) {
             pkgsToRestart.forEach { pkg ->
                 if (pkg.matches(Regex("[A-Za-z0-9_.]+"))) {
@@ -1158,49 +1071,29 @@ class ServiceGoRoot : Service() {
         // oem_location binders exist). We route the selected
         // networks into the FakeLocation injection layer below.
         if (modeWifiOnly) {
-            val wsvc = resolveMockLocService()
-            diag.step("oem_location binder", wsvc != null,
-                if (wsvc != null) "已注册" else "未注册——注入未生效")
-            // WiFi spoofing is fully independent of location: WifiServiceHook
-            // gates only on MockWifiConfigManager.isMockWifiEnabled(). Clear
-            // any leftover location/GNSS mock state from a previous (non-wifi)
-            // session so enabling only WiFi spoofing doesn't leave GPS faking
-            // active, then push the selected WiFi networks.
-            runCatching {
-                resolveMockLocService()?.let {
-                    it.stopMockLocation()
-                    it.setMockGpsStatus(false)
-                    it.setMockCells(null)
-                    it.setSafeApps(null)
-                }
-            }
+            // WiFi spoofing 完全独立于位置模拟：WifiServiceHook 只看
+            // MockWifiConfigManager.isMockWifiEnabled()。App 只负责经 Provider +
+            // 文件通道下发选中的 WiFi 网络，由 system_server 直接刷入。
             val wifiPushed = runCatching { applyWifiMockOnInjection(); true }.getOrDefault(false)
             diag.step("下发 WiFi 模拟", wifiPushed)
             applyAllowPackages(independentAllowPackages)
-            KailLog.i(this, TAG, "wifiOnly: inject staged, WiFi networks pushed, location+GNSS skipped")
-            val ok = wifiPushed && wsvc != null
-            diag.verdict(ok, "仅 WiFi 模拟")
+            KailLog.i(this, TAG, "wifiOnly: WiFi networks pushed, location+GNSS skipped")
+            diag.verdict(wifiPushed, "仅 WiFi 模拟")
             diag.finish()
-            return ok
+            return wifiPushed
         }
 
         if (modeCellOnly) {
-            val csvc = resolveMockLocService()
-            diag.step("oem_location binder", csvc != null,
-                if (csvc != null) "已注册" else "未注册——注入未生效")
-            // Cell spoofing goes through TelephonyRegistryHook, whose isHook()
-            // requires MockLocationHookManager.isMocking()==true. So cell mode
-            // DOES start location mocking (to arm the telephony hook) and
-            // seeds a base fix from the cell coordinates, but it keeps GNSS
-            // satellite mocking OFF and does not run the moving-location loop.
+            // 基站模拟经 TelephonyRegistryHook / PhoneInterfaceManagerHook，要求
+            // MockLocationHookManager.isMocking()==true（由 system_server 的
+            // applyCellMockConfig 置位）。App 负责下发配置 + 注入 com.android.phone。
             val cellPushed = runCatching { applyCellMockOnInjection(); true }.getOrDefault(false)
             diag.step("下发基站模拟", cellPushed)
             applyAllowPackages(independentAllowPackages)
-            KailLog.i(this, TAG, "cellOnly: inject staged, cell towers pushed, GNSS skipped")
-            val ok = cellPushed && csvc != null
-            diag.verdict(ok, "仅基站模拟")
+            KailLog.i(this, TAG, "cellOnly: cell towers pushed, GNSS skipped")
+            diag.verdict(cellPushed, "仅基站模拟")
             diag.finish()
-            return ok
+            return cellPushed
         }
 
         // On Android 16 / OnePlus, system_server is allowed to run our injected
@@ -1249,8 +1142,7 @@ class ServiceGoRoot : Service() {
             }
             diag.step("步频模拟", stepControlOk, stepDetail)
         }
-        val svc = resolveMockLocService()
-        diag.info("oem_location binder", if (svc != null) "已注册（兼容路径可用）" else "未注册（使用控制文件路径）")
+        diag.info("数据通道", "Provider(shm/get_config) + 文件通道（oem_* binder 已弃用）")
         val startupOk = controlOk && stepControlOk
         diag.verdict(startupOk,
             when {
@@ -1264,6 +1156,7 @@ class ServiceGoRoot : Service() {
         // 中的最新选择生效，也不依赖上次会话的遗留文件状态。
         if (controlOk && isCurrentGeneration(generation) && !modeWifiOnly && !modeCellOnly) {
             applyAllowPackages(independentAllowPackages)
+            prepareLocationShm()
             startLocationLoop()
         }
 
@@ -1393,35 +1286,23 @@ class ServiceGoRoot : Service() {
 
     private fun stopMockLocationOnInjection(retry: Boolean = true, rootControlSession: Long = activeRootControlSession) {
         rootControlActive = false
+        disableLocationShm()
+        // 控制文件 enabled=0：system_server 的 RootLocationControl.apply 会停止
+        // MockLocationHookManager 并复位所有开关（位置/基站/GNSS/白名单）。
         runCatching { writeRootLocationControl(false, rootControlSession = rootControlSession) }
-        runCatching { mockLocService?.stopMockLocation() }
-        runCatching { mockLocService?.setMockGpsStatus(false) }
-        runCatching { mockLocService?.setMockCells(null) }
-        runCatching { mockLocService?.stopStepSensorMock() }
-        // Clear any scoped block-list left over from cell-only mode so the next
-        // normal location session isn't silently blocked.
-        runCatching { mockLocService?.setSafeApps(null) }
-        // Clear the independent-mode allow-list so a later "mock all apps"
-        // session isn't accidentally restricted to stale target packages.
-        runCatching { mockLocService?.setAllowMockPackages(null) }
         runCatching { stopWifiMockOnInjection(retry) }
         // 文件通道兜底：清空 WiFi 模拟与基站模拟文件（enabled=0），供下次会话干净起步。
         runCatching { writeCellMockFile(emptyList()) }
-        fakelocStartCalled = false
         runCatching { mMockLocationProvider.cleanup() }
             .onFailure { KailLog.e(this, TAG, "cleanup providers: ${it.message}") }
     }
 
     // ------------------------------------------------------------------
-    // WiFi spoofing bridge (oem_wifi)
+    // WiFi spoofing bridge（Provider + 文件通道）
     //
-    // IMockWifiManager ships with only a Binder.Stub (no client-side Proxy),
-    // so the controller process talks to the registered service via raw
-    // Parcel transactions. Transaction codes mirror the Stub.onTransact
-    // switch in IMockWifiManager:
-    //   2  startMockWifi()
-    //   3  stopMockWifi()
-    //   9  setMockWifiNetworks(List<MockWifiNetwork>)
+    // oem_wifi binder 被 SELinux 拦截，已弃用。App 把 WiFi 网络列表写进
+    // LocationShmProvider.get_config(wifi_config)（主）+ mock_wifi.txt（兜底），
+    // system_server 的 RootLocationControl 取回后刷入 MockWifiConfigManager。
     // ------------------------------------------------------------------
 
     /**
@@ -1437,39 +1318,9 @@ class ServiceGoRoot : Service() {
         return false
     }
 
-    private fun resolveMockWifiBinder(retry: Boolean = true): IBinder? {
-        val attempts = if (retry) 10 else 1
-        repeat(attempts) { index ->
-            val binder = runCatching {
-                ServiceManagerBridge.getService(ClassLoader.getSystemClassLoader(), "oem_wifi")
-            }.getOrNull()
-            if (binder != null) return binder
-            if (retry && index < attempts - 1) runCatching { Thread.sleep(300) }
-        }
-        return null
-    }
-
-    /** Maps a UI [com.kail.location.models.WifiInfo] onto a parceled MockWifiNetwork. */
-    private fun writeMockWifiNetwork(dest: Parcel, wifi: com.kail.location.models.WifiInfo) {
-        // Field order MUST match MockWifiNetwork.writeToParcel:
-        // id, networkType, ssid, bssid, username, password, rssi, linkSpeed,
-        // frequency, capabilities.
-        dest.writeString(if (wifi.id.isNotEmpty()) wifi.id else System.currentTimeMillis().toString())
-        dest.writeString("WIFI")
-        dest.writeString(wifi.ssid)
-        dest.writeString(wifi.bssid)
-        dest.writeString(null) // username
-        dest.writeString(null) // password
-        dest.writeInt(wifi.rssi)
-        dest.writeInt(wifi.linkSpeed)
-        dest.writeInt(wifi.frequency)
-        dest.writeString(wifi.capabilities)
-    }
-
     /**
-     * 把 WiFi 模拟列表写进文件通道 /data/kail-loc/mock_wifi.txt。
-     * system_server 内的 RootLocationControl 轮询该文件并直接刷入
-     * MockWifiConfigManager，绕过 SELinux 对 oem_wifi binder 的拦截。
+     * 把 WiFi 模拟列表写进 Provider（主）+ 文件通道 /data/kail-loc/mock_wifi.txt。
+     * system_server 内的 RootLocationControl 取回后直接刷入 MockWifiConfigManager。
      * 空列表写 enabled=0（= 停止 WiFi 模拟）。
      */
     private fun writeWifiMockFile(list: List<com.kail.location.models.WifiInfo>) {
@@ -1520,6 +1371,14 @@ class ServiceGoRoot : Service() {
     }
 
     private fun writeMockConfigFile(path: String, content: String, what: String) {
+        // Provider 通道优先：system_server 直接 ContentResolver.call 取配置，
+        // 不依赖 su 写文件与 SELinux 文件权限。文件通道保留为兜底。
+        runCatching {
+            when (what) {
+                "wifi" -> LocationShmProvider.setWifiConfig(content)
+                "cell" -> LocationShmProvider.setCellConfig(content)
+            }
+        }.onFailure { KailLog.e(this, TAG, "setProviderConfig($what): ${it.message}") }
         val cmd = "mkdir -p /data/kail-loc && chmod 777 /data/kail-loc && " +
             "printf '%s' ${shellSingleQuote(content)} > $path && chmod 644 $path"
         runCatching { ShellUtils.executeCommand(cmd) }
@@ -1532,66 +1391,15 @@ class ServiceGoRoot : Service() {
             KailLog.w(this, TAG, "applyWifiMockOnInjection: no WiFi networks selected")
             return
         }
-        // 文件通道先行（主通道），binder 仅作兼容路径。
+        // Provider + 文件通道（主通道）：system_server 的 RootLocationControl 消费后
+        // 直接刷入 MockWifiConfigManager，不再依赖被 SELinux 拦截的 oem_wifi binder。
         writeWifiMockFile(pendingWifiList)
-        val binder = resolveMockWifiBinder()
-        if (binder == null) {
-            KailLog.w(this, TAG, "oem_wifi binder not online yet")
-            return
-        }
-        // setMockWifiNetworks(List<MockWifiNetwork>) — write as a typed list.
-        runCatching {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
-            try {
-                data.writeInterfaceToken(WIFI_DESCRIPTOR)
-                data.writeInt(pendingWifiList.size)
-                for (wifi in pendingWifiList) {
-                    // Non-null typed-list element marker, then the object body.
-                    data.writeInt(1)
-                    writeMockWifiNetwork(data, wifi)
-                }
-                binder.transact(TXN_SET_MOCK_WIFI_NETWORKS, data, reply, 0)
-                reply.readException()
-            } finally {
-                reply.recycle()
-                data.recycle()
-            }
-        }.onFailure { KailLog.e(this, TAG, "setMockWifiNetworks: ${it.message}") }
-
-        // startMockWifi()
-        runCatching {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
-            try {
-                data.writeInterfaceToken(WIFI_DESCRIPTOR)
-                binder.transact(TXN_START_MOCK_WIFI, data, reply, 0)
-                reply.readException()
-            } finally {
-                reply.recycle()
-                data.recycle()
-            }
-        }.onFailure { KailLog.e(this, TAG, "startMockWifi: ${it.message}") }
-
-        KailLog.i(this, TAG, "WiFi mock active: ${pendingWifiList.size} networks")
+        KailLog.i(this, TAG, "WiFi mock applied: ${pendingWifiList.size} networks (provider+file)")
     }
 
     private fun stopWifiMockOnInjection(retry: Boolean = true) {
-        // 文件通道先行：清空 /data/kail-loc/mock_wifi.txt（enabled=0）。
+        // 清空 /data/kail-loc/mock_wifi.txt（enabled=0）+ Provider 同步禁用。
         writeWifiMockFile(emptyList())
-        val binder = resolveMockWifiBinder(retry) ?: return
-        runCatching {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
-            try {
-                data.writeInterfaceToken(WIFI_DESCRIPTOR)
-                binder.transact(TXN_STOP_MOCK_WIFI, data, reply, 0)
-                reply.readException()
-            } finally {
-                reply.recycle()
-                data.recycle()
-            }
-        }.onFailure { KailLog.e(this, TAG, "stopMockWifi: ${it.message}") }
     }
 
     // ------------------------------------------------------------------
@@ -1601,99 +1409,29 @@ class ServiceGoRoot : Service() {
     // MockLocationHookManager.isMocking() is true, so cell mode arms location
     // mocking + seeds a base fix from the first cell's coordinates, but keeps
     // GNSS satellite mocking OFF and never runs the moving-location loop.
+    // App 只负责经 Provider + 文件通道下发小区列表。
     // ------------------------------------------------------------------
-
-    /** Builds an inject-side CellTowerInfo via Parcel (no public constructor). */
-    private fun buildCellTowerInfo(cell: com.kail.location.models.CellInfo): com.kail.location.inject.fakelocation.model.CellTowerInfo? =
-        runCatching {
-            val p = Parcel.obtain()
-            try {
-                // Field order MUST match CellTowerInfo(Parcel):
-                // radioType, mcc, mnc, lac, psc, cellId, latitude, longitude, accuracy.
-                p.writeString(cell.networkType)
-                p.writeInt(cell.mcc)
-                p.writeInt(cell.mnc)
-                p.writeInt(cell.lac)
-                p.writeInt(cell.psc)
-                p.writeLong(cell.cid)
-                p.writeDouble(cell.latitude)
-                p.writeDouble(cell.longitude)
-                p.writeFloat(cell.radius)
-                p.setDataPosition(0)
-                com.kail.location.inject.fakelocation.model.CellTowerInfo.CREATOR.createFromParcel(p)
-            } finally {
-                p.recycle()
-            }
-        }.getOrNull()
 
     private fun applyCellMockOnInjection() {
         if (pendingCellList.isEmpty()) {
             KailLog.w(this, TAG, "applyCellMockOnInjection: no cells selected")
             return
         }
-        // 文件通道先行（主通道），binder 仅作兼容路径。
+        // Provider + 文件通道（主通道）：system_server 的 RootLocationControl 消费后
+        // 直接 setMockCells / setSafeApps("abhf|*") / startMockLocation / 种子位置，
+        // 不再依赖被 SELinux 拦截的 oem_location binder。
         writeCellMockFile(pendingCellList)
-        val svc = resolveMockLocServiceWithRetry()
-        if (svc == null) {
-            KailLog.w(this, TAG, "oem_location binder not online yet (cell)")
-            return
-        }
-        val towers = ArrayList<com.kail.location.inject.fakelocation.model.CellTowerInfo>()
-        for (cell in pendingCellList) buildCellTowerInfo(cell)?.let { towers.add(it) }
-        if (towers.isEmpty()) {
-            KailLog.w(this, TAG, "applyCellMockOnInjection: failed to build any CellTowerInfo")
-            return
-        }
-        runCatching {
-            // The cell-tower hooks (TelephonyRegistryHook / PhoneInterfaceManagerHook)
-            // only fire while MockLocationHookManager.isMocking() is true, so cell
-            // mode has to flip the master mock switch on. To avoid ALSO faking the
-            // device location (issue: "单独开启基站模拟位置也会模拟"), we install a
-            // scoped block-list via setSafeApps: scope letters map to features
-            //   a=普通定位  b=路线  h=摇杆  f=GNSS卫星  e=基站
-            // ScopedListFilter treats safeApps as a BLOCK list, so "abhf|*" blocks
-            // every location/GNSS scope for all packages while leaving "e" (cells)
-            // untouched. Result: cells are spoofed, location/GNSS are not.
-            svc.setSafeApps(arrayListOf("abhf|*"))
-            svc.setMockGpsStatus(false)
-            // isMocking must be true for the telephony hook; the scoped block-list
-            // above prevents the position itself from being handed to apps.
-            svc.startMockLocation()
-            svc.setIntervalTimeout(currentLocationUpdateIntervalMs())
-            // Seed a base fix so getMockLocation() is non-null — CellInfoFactory and
-            // the onCellLocationChanged bundle read it for the base-station lat/lng.
-            // It is NOT delivered to apps as a position because scope "a"/"h" are
-            // blocked above. Use the first cell with valid coordinates.
-            val anchor = pendingCellList.firstOrNull { it.latitude != 0.0 || it.longitude != 0.0 }
-            val baseLat = anchor?.latitude ?: mCurLat
-            val baseLng = anchor?.longitude ?: mCurLng
-            val loc = Location(LocationManager.GPS_PROVIDER).apply {
-                latitude = baseLat
-                longitude = baseLng
-                altitude = mCurAlt
-                accuracy = 25.0f
-                time = System.currentTimeMillis()
-                elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
-                extras = Bundle().apply { putString("from", "loc") }
-            }
-            svc.setMockLocation(loc)
-            svc.setMockCells(towers)
-            KailLog.i(this, TAG, "Cell mock active: ${towers.size} towers, anchor=$baseLat,$baseLng (location scope blocked)")
-        }.onFailure { KailLog.e(this, TAG, "applyCellMockOnInjection: ${it.message}") }
 
-        // The synchronous cell-pull APIs (TelephonyManager.getAllCellInfo /
-        // getCellLocation) are served by com.android.phone, a separate process
-        // that the system_server-only inject never touches. Inject the app-hook
-        // loader into it so PhoneInterfaceManagerHook installs there too;
-        // otherwise apps that poll cells directly (rather than via a
-        // PhoneStateListener push) keep seeing the real towers.
+        // pull API（TelephonyManager.getAllCellInfo / getCellLocation）由 com.android.phone
+        // 进程的 PhoneInterfaceManager 提供，必须把 app-hook 注入该进程才能拦到；
+        // 它读取模拟小区走 Provider / 文件通道（见 MockLocationServiceManager）。
         Thread({
             runCatching { RootDeployer.injectAppProcess(applicationContext, "com.android.phone") }
                 .onFailure { KailLog.e(this, TAG, "inject com.android.phone: ${it.message}") }
         }, "ServiceGoRootPhoneInject").start()
-    }
 
-    private var fakelocStartCalled: Boolean = false
+        KailLog.i(this, TAG, "Cell mock applied: ${pendingCellList.size} towers (provider+file)")
+    }
 
     private data class RootLocationAck(
         val status: String,
@@ -1744,6 +1482,16 @@ class ServiceGoRoot : Service() {
     )
 
     private fun buildRootLocationControlContent(enabled: Boolean): String {
+        // 步频配置同时进 Provider（主），供 system_server 直接 call 取。
+        val stepContent = if (enabled) {
+            "step_enabled=${if (stepEnabled) 1 else 0}\n" +
+                "step_spm=$stepCadence\n" +
+                "step_mode=$stepMode\n" +
+                "step_scheme=$stepScheme\n"
+        } else {
+            "step_enabled=0\n"
+        }
+        runCatching { LocationShmProvider.setConfig(LocationShm.PROVIDER_KEY_STEP_CONFIG, stepContent) }
         return if (enabled) {
             "enabled=1\n" +
                 "lat=$mCurLat\n" +
@@ -1752,10 +1500,7 @@ class ServiceGoRoot : Service() {
                 "bearing=$mCurBea\n" +
                 "speed=$mSpeed\n" +
                 "interval=${currentLocationUpdateIntervalMs()}\n" +
-                "step_enabled=${if (stepEnabled) 1 else 0}\n" +
-                "step_spm=$stepCadence\n" +
-                "step_mode=$stepMode\n" +
-                "step_scheme=$stepScheme\n"
+                stepContent
         } else {
             "enabled=0\n"
         }
@@ -2085,56 +1830,97 @@ class ServiceGoRoot : Service() {
     }
 
 
+    /**
+     * 创建/复用 Phase 1 共享内存（ashmem）并注册给 [LocationShmProvider]。
+     *
+     * 共享内存按「App 进程生命周期」复用：同一进程内多次开始模拟共用同一块
+     * ashmem，只重置 header / 置 enabled=1，这样 system_server 侧的映射不会失效。
+     * App 进程重启后才会新建（system_server 读端靠「长时间无新样本」自愈重映射）。
+     *
+     * 失败（VarHandle 不可用 / ashmem 创建失败 / 映射失败）返回 false，
+     * [pushLocationToInjection] 自动回退控制文件通道，功能不回归。
+     */
+    private fun prepareLocationShm(): Boolean {
+        if (!LocationShm.isAvailable()) {
+            KailLog.w(this, TAG, "shm unavailable (no VarHandle); using control-file transport")
+            return false
+        }
+        return runCatching {
+            var buffer = locationShmBuffer
+            if (buffer == null || LocationShmProvider.getSharedMemory() == null) {
+                closeLocationShm()
+                val shared = SharedMemory.create(LocationShm.ASHMEM_NAME, LocationShm.SIZE)
+                runCatching {
+                    shared.setProtect(OsConstants.PROT_READ or OsConstants.PROT_WRITE)
+                }
+                buffer = shared.mapReadWrite()
+                locationShmShared = shared
+                locationShmBuffer = buffer
+                LocationShmProvider.setSharedMemory(shared)
+            }
+            LocationShm.initHeader(buffer, 1)
+            KailLog.i(this, TAG, "location shm ready size=${LocationShm.SIZE}")
+            true
+        }.getOrElse {
+            KailLog.e(this, TAG, "prepareLocationShm failed: ${it.message}")
+            closeLocationShm()
+            false
+        }
+    }
+
+    /** 结束会话：仅停用共享内存，保留 ashmem 供下次会话复用。 */
+    private fun disableLocationShm() {
+        runCatching { LocationShm.setEnabled(locationShmBuffer, false) }
+    }
+
+    /** 彻底关闭并注销共享内存。可重复调用。 */
+    private fun closeLocationShm() {
+        runCatching { LocationShm.setEnabled(locationShmBuffer, false) }
+        LocationShmProvider.setSharedMemory(null)
+        locationShmBuffer = null
+        runCatching { locationShmShared?.close() }
+        locationShmShared = null
+    }
+
     private fun pushLocationToInjection() {
         // Never push location / enable GNSS mock in WiFi-only or cell-only
         // mode — those modes spoof only WiFi scan results / cell towers.
         if (modeWifiOnly || modeCellOnly) return
 
-        // Path 1: FakeLocation binder.
-        // Re-resolve every push so that updates start flowing through the
-        // FakeLocation injection layer as soon as kail_inject finishes,
-        // even if the location loop began before the binder was online.
-        val svc = mockLocService ?: resolveMockLocService()
-        if (svc != null) {
-            // First time we got the binder, tell it to start mocking.
-            if (!fakelocStartCalled) {
-                fakelocStartCalled = true
-                runCatching {
-                    svc.startMockLocation()
-                    svc.setIntervalTimeout(currentLocationUpdateIntervalMs())
-                    // Enable GNSS / IGnssStatusListener mocking so consumers
-                    // see synthetic SV-status events alongside the spoofed
-                    // location. Without this flag the GnssStatusCallback*
-                    // proxies fall through to the real listener and leak
-                    // the actual constellation.
-                    svc.setMockGpsStatus(true)
-                    KailLog.i(this, TAG, "FakeLocation startMockLocation invoked")
-                }.onFailure { KailLog.e(this, TAG, "startMockLocation (binder): ${it.message}") }
+        // Path 0: shared memory (Phase 1 fast path). App writes the latest
+        // position into ashmem; the injected system_server mmaps the same
+        // region and reads it, so there is no per-tick su/file IPC.
+        val shm = locationShmBuffer
+        if (shm != null && LocationShm.isEnabled(shm)) {
+            var lat = mCurLat
+            var lng = mCurLng
+            if (PreferenceManager.getDefaultSharedPreferences(this)
+                    .getBoolean("setting_natural_jitter", false)
+            ) {
+                val sigma = 2.5e-6
+                lat += (Math.random() * 2 - 1) * sigma
+                lng += (Math.random() * 2 - 1) * sigma
+                mCurLat = lat
+                mCurLng = lng
             }
-            runCatching {
-                val prefs = PreferenceManager.getDefaultSharedPreferences(this)
-                if (prefs.getBoolean("setting_natural_jitter", false)) {
-                    val sigma = 2.5e-6
-                    mCurLat += (Math.random() * 2 - 1) * sigma
-                    mCurLng += (Math.random() * 2 - 1) * sigma
-                }
-                val loc = Location(LocationManager.GPS_PROVIDER).apply {
-                    latitude = mCurLat
-                    longitude = mCurLng
-                    altitude = mCurAlt
-                    bearing = mCurBea
-                    speed = mSpeed.toFloat()
-                    accuracy = 1.0f
-                    time = System.currentTimeMillis()
-                    elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
-                    extras = Bundle().apply { putString("from", "rocker") }
-                }
-                svc.setMockLocation(loc)
-            }.onFailure { KailLog.e(this, TAG, "setMockLocation (binder): ${it.message}") }
-            return
+            if (LocationShm.writeSample(
+                    shm,
+                    SystemClock.elapsedRealtimeNanos(),
+                    lat,
+                    lng,
+                    mCurAlt,
+                    mCurBea.toDouble(),
+                    mSpeed,
+                    1.0,
+                    0,
+                    0
+                )
+            ) {
+                return
+            }
         }
 
-        // Path 2: system_server control file. On some Android 16 ROMs the
+        // Path 1: system_server control file. On some Android 16 ROMs the
         // injected binder is hidden from untrusted_app while SELinux is
         // enforcing; avoid setenforce 0 and let the injected system_server
         // thread consume location updates directly.

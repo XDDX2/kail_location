@@ -105,14 +105,23 @@ class RootAppHideViewModel(application: Application) : AndroidViewModel(applicat
                     ctx.startService(intent)
                 }
             } else {
-                if (!com.kail.location.service.Root.ServiceGoRoot.isRunning) return
+                // 停止：即使服务当前没在运行，也必须把 stop 指令送进去——服务会写
+                // enabled=0 的配置（目标进程的 hook 实时读取后即停止隐藏）再 stopSelf。
+                // 之前这里 `if (!isRunning) return`，导致「App/服务重启后再点停止」无效：
+                // 配置文件仍是 enabled=1，目标进程继续隐藏，表现就是"停止不了"。
                 val intent = android.content.Intent(ctx, svc).apply {
                     putExtra(
                         com.kail.location.service.Root.ServiceGoRoot.EXTRA_CONTROL_ACTION,
                         com.kail.location.service.Root.ServiceGoRoot.CONTROL_STOP_HIDE
                     )
                 }
-                ctx.startService(intent)
+                if (com.kail.location.service.Root.ServiceGoRoot.isRunning) {
+                    ctx.startService(intent)
+                } else if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    ctx.startForegroundService(intent)
+                } else {
+                    ctx.startService(intent)
+                }
             }
         } catch (e: Exception) {
             KailLog.e(getApplication(), TAG, "pushHideConfig failed", e)

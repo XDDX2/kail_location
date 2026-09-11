@@ -80,20 +80,25 @@ public final class CameraHookConfig {
     public static CameraHookConfig load() {
         CameraHookConfig cfg = new CameraHookConfig();
         try {
-            File f = new File(CONFIG_PATH);
-            if (!f.exists()) {
-                return cfg;
+            // Provider 通道优先（App 的 LocationShmProvider.get_config）。
+            String json = com.kail.location.inject.utils.ConfigProviderChannel
+                    .get(com.kail.location.inject.utils.LocationShm.PROVIDER_KEY_CAMERA_CONFIG);
+            if (json == null) {
+                File f = new File(CONFIG_PATH);
+                if (!f.exists()) {
+                    return cfg;
+                }
+                FileInputStream in = new FileInputStream(f);
+                byte[] buf = new byte[(int) Math.min(f.length(), 1 << 20)];
+                int off = 0;
+                int r;
+                while (off < buf.length && (r = in.read(buf, off, buf.length - off)) != -1) {
+                    off += r;
+                }
+                in.close();
+                json = new String(buf, 0, off, "UTF-8");
             }
-            FileInputStream in = new FileInputStream(f);
-            byte[] buf = new byte[(int) Math.min(f.length(), 1 << 20)];
-            int off = 0;
-            int r;
-            while (off < buf.length && (r = in.read(buf, off, buf.length - off)) != -1) {
-                off += r;
-            }
-            in.close();
-            String json = new String(buf, 0, off, "UTF-8").trim();
-            parseInto(json, cfg);
+            parseInto(json.trim(), cfg);
         } catch (Throwable th) {
             InjectLog.e(TAG, "load config failed", th);
         }

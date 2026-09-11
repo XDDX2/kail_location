@@ -73,7 +73,19 @@ public final class HideConfigFile {
     }
 
     private static Config parseFile() {
-        Config cfg = new Config();
+        // Provider 通道优先（App 的 LocationShmProvider.get_config）。
+        String text = ConfigProviderChannel.get(LocationShm.PROVIDER_KEY_HIDE_CONFIG);
+        if (text == null) {
+            text = readFileText();
+        }
+        if (text == null) {
+            return new Config();
+        }
+        return parse(text);
+    }
+
+    /** 文件通道兜底读取。 */
+    private static String readFileText() {
         // 注意：不能用 new File(...)/new FileReader(...) 读配置——
         // File 构造器会被 RootHideHook 挂钩，而 hook 判断开关又走到这里读配置，
         // 造成无限递归（StackOverflowError）。FileInputStream(String) 不在钩子范围内。
@@ -88,12 +100,16 @@ public final class HideConfigFile {
             }
         } catch (Throwable t) {
             // 文件不存在/读不到就当没启用，保持安静。
-            return cfg;
+            return null;
         }
         if (n <= 0) {
-            return cfg;
+            return null;
         }
-        String text = new String(buf, 0, n, StandardCharsets.UTF_8);
+        return new String(buf, 0, n, StandardCharsets.UTF_8);
+    }
+
+    private static Config parse(String text) {
+        Config cfg = new Config();
         String[] lines = text.split("\n");
         for (String line : lines) {
             int idx = line.indexOf('=');

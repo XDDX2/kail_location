@@ -87,25 +87,29 @@ public final class AntiDetectConfigFile {
     }
 
     private static Config parseFile() {
-        Config cfg = new Config();
-        // 与 HideConfigFile 相同：用 FileInputStream(String) 绕开 RootHideHook 对
-        // File 构造器的挂钩，避免递归。
-        byte[] buf = new byte[4096];
-        int n;
-        try {
-            FileInputStream fis = new FileInputStream(PATH);
+        // Provider 通道优先（App 的 LocationShmProvider.get_config）。
+        String text = ConfigProviderChannel.get(LocationShm.PROVIDER_KEY_ANTIDETECT_CONFIG);
+        if (text == null) {
+            // 文件通道兜底：与 HideConfigFile 相同，用 FileInputStream(String)
+            // 绕开 RootHideHook 对 File 构造器的挂钩，避免递归。
+            byte[] buf = new byte[4096];
+            int n;
             try {
-                n = fis.read(buf);
-            } finally {
-                fis.close();
+                FileInputStream fis = new FileInputStream(PATH);
+                try {
+                    n = fis.read(buf);
+                } finally {
+                    fis.close();
+                }
+            } catch (Throwable t) {
+                return new Config();
             }
-        } catch (Throwable t) {
-            return cfg;
+            if (n <= 0) {
+                return new Config();
+            }
+            text = new String(buf, 0, n, StandardCharsets.UTF_8);
         }
-        if (n <= 0) {
-            return cfg;
-        }
-        String text = new String(buf, 0, n, StandardCharsets.UTF_8);
+        Config cfg = new Config();
         for (String line : text.split("\n")) {
             int idx = line.indexOf('=');
             if (idx <= 0) continue;

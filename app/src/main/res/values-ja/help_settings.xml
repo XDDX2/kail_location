@@ -21,7 +21,6 @@
     <string name="help_settings_debug_log">デバッグログを有効化</string>
     <string name="help_settings_export_log">ログファイルをエクスポート</string>
     <string name="help_settings_clear_log">ログキャッシュを削除</string>
-    <string name="help_settings_selinux">SELinux許可モードスイッチ</string>
     <string name="help_settings_baidu_key">百度地図のAPIキーを設定</string>
     <string name="help_settings_opencellid_key">OpenCellID APIキーを設定</string>
     <string name="help_settings_history_expiration">履歴の保持期間を設定</string>

@@ -120,9 +120,17 @@ public class MockWifiConfigManager {
 
     public static void setPrimaryMockWifiNetwork(MockWifiNetwork network) {
         synchronized (configLock) {
-            ArrayList arrayList = new ArrayList();
-            arrayList.add(network);
-            mockWifiNetworks = arrayList;
+            // 只替换主网络（列表第 0 个），不能清空其余已选网络。
+            // 之前直接 new 一个只含 network 的 list，导致多选 WiFi 只生效第一个。
+            if (mockWifiNetworks != null && !mockWifiNetworks.isEmpty()) {
+                ArrayList<MockWifiNetwork> copy = new ArrayList<>(mockWifiNetworks);
+                copy.set(0, network);
+                mockWifiNetworks = copy;
+            } else {
+                ArrayList<MockWifiNetwork> arrayList = new ArrayList<>();
+                arrayList.add(network);
+                mockWifiNetworks = arrayList;
+            }
         }
     }
 

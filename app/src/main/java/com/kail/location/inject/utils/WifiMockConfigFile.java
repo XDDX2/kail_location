@@ -66,7 +66,6 @@ public final class WifiMockConfigFile {
     }
 
     private static Config parseFile() {
-        Config cfg = new Config();
         // 与 HideConfigFile 一致：用 FileInputStream(String) 直读，避免 File 构造器
         // 可能被 Hook 的递归风险。
         byte[] buf = new byte[4096];
@@ -79,12 +78,20 @@ public final class WifiMockConfigFile {
                 fis.close();
             }
         } catch (Throwable t) {
-            return cfg;
+            return new Config();
         }
         if (n <= 0) {
+            return new Config();
+        }
+        return parse(new String(buf, 0, n, StandardCharsets.UTF_8));
+    }
+
+    /** 解析与文件通道相同格式的配置文本（Provider 通道复用）。 */
+    public static Config parse(String text) {
+        Config cfg = new Config();
+        if (text == null || text.isEmpty()) {
             return cfg;
         }
-        String text = new String(buf, 0, n, StandardCharsets.UTF_8);
         String[] blocks = text.split("\n\n");
         for (String block : blocks) {
             String[] lines = block.split("\n");

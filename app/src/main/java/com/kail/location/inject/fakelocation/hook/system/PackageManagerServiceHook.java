@@ -4738,6 +4738,7 @@ public class PackageManagerServiceHook {
 
     /* JADX INFO: Access modifiers changed from: private */
     public static void log(Object... objArr) {
+        if (!com.kail.location.inject.utils.InjectLog.hookLogEnabled) return;
         com.kail.location.inject.utils.InjectLog.log("PackageManagerServiceHook", objArr);
     }
 

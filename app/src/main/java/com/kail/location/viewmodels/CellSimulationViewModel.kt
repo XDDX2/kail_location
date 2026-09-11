@@ -144,6 +144,31 @@ class CellSimulationViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    /**
+     * 模拟进行中时，把最新的基站列表推给正在运行的 ServiceGoRoot，立即生效
+     * （页面内添加/勾选后无需停止再开始）。未在模拟时不做任何事。
+     */
+    private fun pushCellListToService() {
+        if (!_isSimulating.value) return
+        try {
+            val ctx = getApplication<Application>().applicationContext
+            val intent = android.content.Intent(ctx, com.kail.location.service.Root.ServiceGoRoot::class.java).apply {
+                putExtra(
+                    com.kail.location.service.Root.ServiceGoRoot.EXTRA_CONTROL_ACTION,
+                    com.kail.location.service.Root.ServiceGoRoot.CONTROL_SET_CELL
+                )
+                putParcelableArrayListExtra(
+                    com.kail.location.service.Root.ServiceGoRoot.EXTRA_CELL_LIST,
+                    ArrayList(activeCellList)
+                )
+            }
+            ctx.startService(intent)
+            KailLog.i(ctx, TAG, "pushCellListToService: ${activeCellList.size} towers")
+        } catch (e: Exception) {
+            KailLog.e(getApplication(), TAG, "pushCellListToService failed", e)
+        }
+    }
+
     private fun stopServiceGoRootCellMode() {
         try {
             val ctx = getApplication<Application>().applicationContext
@@ -243,6 +268,7 @@ target_packages="""
         }
         _selectedIds.value = current
         saveSelectedIds(current)
+        pushCellListToService()
     }
 
     fun selectAll() {
@@ -269,6 +295,7 @@ target_packages="""
         val newList = _cellList.value.map { if (it.id == info.id) info else it }
         _cellList.value = newList
         saveCellList(newList)
+        pushCellListToService()
     }
 
     fun deleteCell(id: String) {

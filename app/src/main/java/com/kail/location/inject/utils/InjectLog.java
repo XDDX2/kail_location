@@ -63,6 +63,21 @@ public final class InjectLog {
     private static volatile boolean xposedResolved = false;
     private static volatile String cachedProcess = null;
 
+    // 取调用者信息时的重入保护。某些被 hook 的方法（如 StackTraceElement.getClassName）
+    // 自身会打日志，链路为：log -> emit -> callerInfo -> Thread.getStackTrace -> getClassName
+    // （又被 hook）-> log …… 自指成环。用本线程标记打断：重入时直接返回 "Unknown"，不再取栈。
+    private static final ThreadLocal<Boolean> IN_CALLER_INFO = new ThreadLocal<Boolean>();
+
+    // 日志整体重入保护：被 hook 的方法（File.exists / ClassLoader.loadClass /
+    // StackTraceElement.getClassName 等）内部会再打日志，若日志组件恰好调用了这些方法
+    // 就会自指成环。同一线程重入时直接丢弃这条日志，从根上断掉所有此类环。
+    private static final ThreadLocal<Boolean> IN_EMIT = new ThreadLocal<Boolean>();
+
+    // 各 Hook 类埋点总开关（默认关）。被 hook 的方法（File.exists/list、
+    // ClassLoader.loadClass、SystemProperties.get*、PackageManagerService 查询等）
+    // 会被目标 App 极高频调用，逐条打日志会刷屏并拖慢目标进程，故默认关闭。
+    public static volatile boolean hookLogEnabled = false;
+
     // ------------------------------------------------------------------
     // 宿主可调用的强制开关（可选）。
     // ------------------------------------------------------------------
@@ -132,50 +147,57 @@ public final class InjectLog {
     // 核心实现。
     // ------------------------------------------------------------------
     private static void emit(String tag, char level, boolean highFrequency, Object... parts) {
-        refreshFlags();
+        // 日志重入保护：被 hook 的方法内部又触发日志时直接丢弃，避免自指死循环。
+        if (IN_EMIT.get() != null) return;
+        IN_EMIT.set(Boolean.TRUE);
+        try {
+            refreshFlags();
 
-        boolean warnOrError = level == 'w' || level == 'e';
-        boolean verboseLike = highFrequency || level == 'v';
+            boolean warnOrError = level == 'w' || level == 'e';
+            boolean verboseLike = highFrequency || level == 'v';
 
-        if (!warnOrError) {
-            if (!enabled) return;
-            if (verboseLike && !verbose) return;
-        }
-
-        String caller = callerInfo();
-        String suffix = "";
-        if (verboseLike && !warnOrError) {
-            int dropped = highFreqGate(tag + "@" + caller);
-            if (dropped < 0) return;
-            if (dropped > 0) suffix = " (+" + dropped + " suppressed)";
-        }
-
-        String body = join(parts);
-        String thread = Thread.currentThread().getName();
-        String logcatTag = TAG_PREFIX + tag;
-        String logcatMessage = "[" + thread + "] " + caller + " | " + body + suffix;
-
-        Method m = xposedLogMethod();
-        if (m != null) {
-            try {
-                m.invoke(null, logcatTag + ": " + logcatMessage);
-            } catch (Throwable ignored) {
+            if (!warnOrError) {
+                if (!enabled) return;
+                if (verboseLike && !verbose) return;
             }
-        }
 
-        switch (level) {
-            case 'v': Log.v(logcatTag, logcatMessage); break;
-            case 'i': Log.i(logcatTag, logcatMessage); break;
-            case 'w': Log.w(logcatTag, logcatMessage); break;
-            case 'e': Log.e(logcatTag, logcatMessage); break;
-            default:  Log.d(logcatTag, logcatMessage); break;
-        }
+            String caller = callerInfo();
+            String suffix = "";
+            if (verboseLike && !warnOrError) {
+                int dropped = highFreqGate(tag + "@" + caller);
+                if (dropped < 0) return;
+                if (dropped > 0) suffix = " (+" + dropped + " suppressed)";
+            }
 
-        // 文件落盘严格跟随宿主日志开关；关闭日志时不再写外部 logs 目录。
-        if (fileEnabled) {
-            String fileMessage = Character.toUpperCase(level) + " [" + processName() + "/" + thread + "] "
-                    + tag + " " + caller + " | " + body + suffix;
-            writeFile(fileMessage);
+            String body = join(parts);
+            String thread = Thread.currentThread().getName();
+            String logcatTag = TAG_PREFIX + tag;
+            String logcatMessage = "[" + thread + "] " + caller + " | " + body + suffix;
+
+            Method m = xposedLogMethod();
+            if (m != null) {
+                try {
+                    m.invoke(null, logcatTag + ": " + logcatMessage);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            switch (level) {
+                case 'v': Log.v(logcatTag, logcatMessage); break;
+                case 'i': Log.i(logcatTag, logcatMessage); break;
+                case 'w': Log.w(logcatTag, logcatMessage); break;
+                case 'e': Log.e(logcatTag, logcatMessage); break;
+                default:  Log.d(logcatTag, logcatMessage); break;
+            }
+
+            // 文件落盘严格跟随宿主日志开关；关闭日志时不再写外部 logs 目录。
+            if (fileEnabled) {
+                String fileMessage = Character.toUpperCase(level) + " [" + processName() + "/" + thread + "] "
+                        + tag + " " + caller + " | " + body + suffix;
+                writeFile(fileMessage);
+            }
+        } finally {
+            IN_EMIT.remove();
         }
     }
 
@@ -184,32 +206,39 @@ public final class InjectLog {
      * 仅供 {@link #persist} 使用，承载低频高价值的一次性诊断信息；文件落盘仍受开关控制。
      */
     private static void emitAlways(String tag, char level, Object... parts) {
-        refreshFlags();
+        // 同 emit：日志重入保护。
+        if (IN_EMIT.get() != null) return;
+        IN_EMIT.set(Boolean.TRUE);
+        try {
+            refreshFlags();
 
-        String caller = callerInfo();
-        String body = join(parts);
-        String thread = Thread.currentThread().getName();
-        String logcatTag = TAG_PREFIX + tag;
-        String logcatMessage = "[" + thread + "] " + caller + " | " + body;
+            String caller = callerInfo();
+            String body = join(parts);
+            String thread = Thread.currentThread().getName();
+            String logcatTag = TAG_PREFIX + tag;
+            String logcatMessage = "[" + thread + "] " + caller + " | " + body;
 
-        Method m = xposedLogMethod();
-        if (m != null) {
-            try {
-                m.invoke(null, logcatTag + ": " + logcatMessage);
-            } catch (Throwable ignored) {
+            Method m = xposedLogMethod();
+            if (m != null) {
+                try {
+                    m.invoke(null, logcatTag + ": " + logcatMessage);
+                } catch (Throwable ignored) {
+                }
             }
-        }
 
-        switch (level) {
-            case 'w': Log.w(logcatTag, logcatMessage); break;
-            case 'e': Log.e(logcatTag, logcatMessage); break;
-            default:  Log.i(logcatTag, logcatMessage); break;
-        }
+            switch (level) {
+                case 'w': Log.w(logcatTag, logcatMessage); break;
+                case 'e': Log.e(logcatTag, logcatMessage); break;
+                default:  Log.i(logcatTag, logcatMessage); break;
+            }
 
-        if (fileEnabled) {
-            String fileMessage = Character.toUpperCase(level) + " [" + processName() + "/" + thread + "] "
-                    + tag + " " + caller + " | " + body;
-            writeFile(fileMessage);
+            if (fileEnabled) {
+                String fileMessage = Character.toUpperCase(level) + " [" + processName() + "/" + thread + "] "
+                        + tag + " " + caller + " | " + body;
+                writeFile(fileMessage);
+            }
+        } finally {
+            IN_EMIT.remove();
         }
     }
 
@@ -240,19 +269,28 @@ public final class InjectLog {
 
     /** 返回调用方「文件名:行号#方法名」，跳过本类与 Thread 帧。 */
     private static String callerInfo() {
-        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        String self = InjectLog.class.getName();
-        for (int i = 3; i < stack.length; i++) {
-            StackTraceElement f = stack[i];
-            if (!f.getClassName().equals(self) && !f.getClassName().contains("java.lang.Thread")) {
-                String file = f.getFileName();
-                if (file == null) file = "Unknown";
-                int line = f.getLineNumber();
-                return line > 0 ? (file + ":" + line + "#" + f.getMethodName())
-                                : (file + "#" + f.getMethodName());
-            }
+        // 重入保护：getClassName() 等被 hook 的方法内部可能再次触发日志，若继续取栈会无限递归。
+        if (IN_CALLER_INFO.get() != null) {
+            return "Unknown";
         }
-        return "Unknown";
+        IN_CALLER_INFO.set(Boolean.TRUE);
+        try {
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            String self = InjectLog.class.getName();
+            for (int i = 3; i < stack.length; i++) {
+                StackTraceElement f = stack[i];
+                if (!f.getClassName().equals(self) && !f.getClassName().contains("java.lang.Thread")) {
+                    String file = f.getFileName();
+                    if (file == null) file = "Unknown";
+                    int line = f.getLineNumber();
+                    return line > 0 ? (file + ":" + line + "#" + f.getMethodName())
+                                    : (file + "#" + f.getMethodName());
+                }
+            }
+            return "Unknown";
+        } finally {
+            IN_CALLER_INFO.remove();
+        }
     }
 
     /**

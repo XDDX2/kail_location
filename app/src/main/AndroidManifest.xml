@@ -197,6 +197,11 @@
             android:authorities="com.kail.location.cameraprovider"
             android:exported="true" />
 
+        <provider
+            android:name="com.kail.location.views.locationshm.LocationShmProvider"
+            android:authorities="com.kail.location.locshm"
+            android:exported="true" />
+
         <service
             android:name="com.kail.location.service.Root.CameraControlService"
             android:exported="false"

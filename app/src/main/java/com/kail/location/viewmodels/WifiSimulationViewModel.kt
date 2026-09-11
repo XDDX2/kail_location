@@ -133,6 +133,44 @@ class WifiSimulationViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    /**
+     * 从 prefs 重新加载列表/选择/模拟状态。
+     *
+     * WifiPickerActivity 用自己独立的 ViewModel 实例添加 WiFi 并写入 prefs，
+     * 返回本页时本页 ViewModel 不会自动感知，导致「模拟中添加的 WiFi 下方不显示」。
+     * 在 Activity.onResume 调用本方法即可刷新。
+     */
+    fun reloadFromPrefs() {
+        _wifiList.value = loadWifiList()
+        _selectedIds.value = loadSelectedIds()
+        _isSimulating.value = prefs.getBoolean(KEY_WIFI_IS_SIMULATING, false)
+    }
+
+    /**
+     * 模拟进行中时，把最新的 WiFi 列表推给正在运行的 ServiceGoRoot，立即生效
+     * （无需停止再开始）。未在模拟时不做任何事。
+     */
+    private fun pushWifiListToService() {
+        if (!_isSimulating.value) return
+        try {
+            val ctx = getApplication<Application>().applicationContext
+            val intent = android.content.Intent(ctx, com.kail.location.service.Root.ServiceGoRoot::class.java).apply {
+                putExtra(
+                    com.kail.location.service.Root.ServiceGoRoot.EXTRA_CONTROL_ACTION,
+                    com.kail.location.service.Root.ServiceGoRoot.CONTROL_SET_WIFI
+                )
+                putParcelableArrayListExtra(
+                    com.kail.location.service.Root.ServiceGoRoot.EXTRA_WIFI_LIST,
+                    ArrayList(activeWifiList)
+                )
+            }
+            ctx.startService(intent)
+            KailLog.i(ctx, TAG, "pushWifiListToService: ${activeWifiList.size} networks")
+        } catch (e: Exception) {
+            KailLog.e(getApplication(), TAG, "pushWifiListToService failed", e)
+        }
+    }
+
     private fun stopServiceGoRootWifiMode() {
         try {
             val ctx = getApplication<Application>().applicationContext
@@ -234,6 +272,7 @@ target_packages="""
         }
         _selectedIds.value = current
         saveSelectedIds(current)
+        pushWifiListToService()
     }
 
     /** Select all history items */

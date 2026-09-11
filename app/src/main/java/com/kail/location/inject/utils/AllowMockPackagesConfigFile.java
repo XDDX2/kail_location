@@ -58,26 +58,38 @@ public final class AllowMockPackagesConfigFile {
     }
 
     private static Config parseFile() {
-        Config cfg = new Config();
-        // 与 HideConfigFile 保持一致：避免 File/FileReader 构造器（可能被 Hook）
-        // 引起的递归风险，用 FileInputStream(String) 直读。
-        byte[] buf = new byte[2048];
-        int n;
-        try {
-            FileInputStream fis = new FileInputStream(PATH);
+        // Provider 通道优先（App 的 LocationShmProvider.get_config）。
+        String text = ConfigProviderChannel.get(LocationShm.PROVIDER_KEY_ALLOW_CONFIG);
+        if (text == null) {
+            // 文件通道兜底：与 HideConfigFile 保持一致，避免 File/FileReader 构造器
+            // （可能被 Hook）引起的递归风险，用 FileInputStream(String) 直读。
+            byte[] buf = new byte[2048];
+            int n;
             try {
-                n = fis.read(buf);
-            } finally {
-                fis.close();
+                FileInputStream fis = new FileInputStream(PATH);
+                try {
+                    n = fis.read(buf);
+                } finally {
+                    fis.close();
+                }
+            } catch (Throwable t) {
+                // 文件不存在/读不到：保持未启用（mock 全部应用），保持安静。
+                return new Config();
             }
-        } catch (Throwable t) {
-            // 文件不存在/读不到：保持未启用（mock 全部应用），保持安静。
+            if (n <= 0) {
+                return new Config();
+            }
+            text = new String(buf, 0, n, StandardCharsets.UTF_8);
+        }
+        return parse(text);
+    }
+
+    /** 解析与文件通道相同格式的配置文本（Provider 通道复用）。 */
+    public static Config parse(String text) {
+        Config cfg = new Config();
+        if (text == null || text.isEmpty()) {
             return cfg;
         }
-        if (n <= 0) {
-            return cfg;
-        }
-        String text = new String(buf, 0, n, StandardCharsets.UTF_8);
         String[] lines = text.split("\n");
         for (String line : lines) {
             int idx = line.indexOf('=');

@@ -548,9 +548,6 @@ class ServiceGoXposed : Service() {
 
         KailLog.i(this, "ServiceGoXposed", ">>> Root access OK")
 
-        val selinuxResult = com.kail.location.utils.ShellUtils.executeCommand("setenforce 0")
-        KailLog.i(this, "ServiceGoXposed", ">>> setenforce 0 result: $selinuxResult")
-
         val soDir = java.io.File("/data/local/kail-lib")
         com.kail.location.utils.ShellUtils.executeCommand("rm -rf ${soDir.absolutePath}")
         com.kail.location.utils.ShellUtils.executeCommand("mkdir -p ${soDir.absolutePath}")
@@ -573,10 +570,6 @@ class ServiceGoXposed : Service() {
                 KailLog.i(this, "ServiceGoXposed", ">>> chmod result: $chmodResult")
                 val chconResult = com.kail.location.utils.ShellUtils.executeCommand("chcon u:object_r:system_file:s0 ${soFile.absolutePath}")
                 KailLog.i(this, "ServiceGoXposed", ">>> chcon result: $chconResult")
-
-                KailLog.i(this, "ServiceGoXposed", ">>> Restoring SELinux to enforcing mode")
-                val selinuxRestoreResult = com.kail.location.utils.ShellUtils.executeCommand("setenforce 1")
-                KailLog.i(this, "ServiceGoXposed", ">>> setenforce 1 result: $selinuxRestoreResult")
             } else {
                 KailLog.e(this, "ServiceGoXposed", ">>> apkSoFile does NOT exist!")
             }

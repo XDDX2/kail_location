@@ -21,7 +21,6 @@
     <string name="help_settings_debug_log">Enable debug logs</string>
     <string name="help_settings_export_log">Export log file</string>
     <string name="help_settings_clear_log">Clear log cache</string>
-    <string name="help_settings_selinux">SELinux permissive-mode toggle</string>
     <string name="help_settings_baidu_key">Set Baidu Map API key</string>
     <string name="help_settings_opencellid_key">Set OpenCellID API key</string>
     <string name="help_settings_history_expiration">Set history retention period</string>

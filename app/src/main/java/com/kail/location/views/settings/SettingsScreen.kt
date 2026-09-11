@@ -127,7 +127,6 @@ fun SettingsScreen(
     val stepSimEnabled by viewModel.stepSimEnabled.collectAsState()
     val simScheme by viewModel.simScheme.collectAsState()
     val opencellidApiKey by viewModel.opencellidApiKey.collectAsState()
-    val selinuxPermissiveEnabled by viewModel.selinuxPermissiveEnabled.collectAsState()
 
     // ===== Xposed 模块隐藏状态 =====
     val xposedScope = rememberCoroutineScope()
@@ -372,15 +371,6 @@ fun SettingsScreen(
             // ===== Group: 其他 =====
             PreferenceCategory(title = stringResource(R.string.setting_group_other))
 
-            BadgedControl(show = showHelp, number = 22, modifier = Modifier.fillMaxWidth()) {
-                SwitchPreference(
-                    title = stringResource(R.string.setting_selinux_permissive),
-                    checked = selinuxPermissiveEnabled,
-                    onCheckedChange = { viewModel.updateBooleanPreference(SettingsViewModel.KEY_SELINUX_PERMISSIVE, it) },
-                    summary = stringResource(R.string.setting_selinux_permissive_summary)
-                )
-            }
-
             BadgedControl(show = showHelp, number = 23, modifier = Modifier.fillMaxWidth()) {
                 EditTextPreference(
                     title = stringResource(R.string.setting_baidu_key),
@@ -513,7 +503,6 @@ fun SettingsScreen(
                 19 to R.string.help_settings_debug_log,
                 20 to R.string.help_settings_export_log,
                 21 to R.string.help_settings_clear_log,
-                22 to R.string.help_settings_selinux,
                 23 to R.string.help_settings_baidu_key,
                 24 to R.string.help_settings_opencellid_key,
                 25 to R.string.help_settings_history_expiration,

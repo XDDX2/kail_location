@@ -4,15 +4,9 @@ import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Process;
-import com.kail.location.inject.fakelocation.service.AntiDetectionManagerService;
-import com.kail.location.inject.fakelocation.service.HideRootManagerService;
-import com.kail.location.inject.fakelocation.service.MockLocationManagerService;
-import com.kail.location.inject.fakelocation.service.MockWifiManagerService;
-import com.kail.location.inject.fakelocation.service.NativeCatchManagerService;
 import com.kail.location.inject.utils.HiddenApiBypass;
 import com.kail.location.inject.utils.PackageSignatureVerifier;
 import com.kail.location.inject.utils.RootLocationControl;
-import com.kail.location.inject.utils.ServiceManagerBridge;
 import com.kail.location.lib.lhooker.LHooker;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -176,22 +170,14 @@ public class InjectDex {
             RootLocationControl.start(context);
             writeBootstrapState("root_location_control_start_called", null);
             PackageSignatureVerifier.verifyPackageSignature(context, "com.kail.location", "oem_manager");
-            boolean locOk = ServiceManagerBridge.addService(context.getClassLoader(), "oem_location", new MockLocationManagerService());
-            boolean wifiOk = ServiceManagerBridge.addService(context.getClassLoader(), "oem_wifi", new MockWifiManagerService());
-            boolean secOk = ServiceManagerBridge.addService(context.getClassLoader(), "oem_security", new AntiDetectionManagerService());
-            boolean integrityOk = ServiceManagerBridge.addService(context.getClassLoader(), "oem_integrity", new HideRootManagerService());
-            boolean nativeOk = ServiceManagerBridge.addService(context.getClassLoader(), "oem_native", new NativeCatchManagerService());
+            // oem_location / oem_wifi / oem_security / oem_integrity / oem_native
+            // 等 binder 服务在本机被 SELinux 拒绝注册（addService denied）且被
+            // 目标进程 find 拦截，已彻底弃用。模拟状态统一走：
+            //   App(Provider + 文件通道) -> system_server RootLocationControl
+            //   -> MockLocationHookManager / MockWifiConfigManager（同进程直调）
+            // 目标进程侧由 MockLocationServiceManager 走 Provider + 文件通道读取。
             com.kail.location.inject.utils.InjectLog.persist("InjectDex",
-                    "addService result oem_location=", locOk,
-                    " oem_wifi=", wifiOk,
-                    " oem_security=", secOk,
-                    " oem_integrity=", integrityOk,
-                    " oem_native=", nativeOk);
-            writeBootstrapState("add_service oem_location=" + locOk
-                    + " oem_wifi=" + wifiOk
-                    + " oem_security=" + secOk
-                    + " oem_integrity=" + integrityOk
-                    + " oem_native=" + nativeOk, null);
+                    "oem_* binder services disabled (SELinux); using provider+file channels");
             PackageSignatureVerifier.verifyPackageSignature(context, "com.kail.location", "oem_bluetooth");
             if (!LHooker.initialized) {
                 com.kail.location.inject.utils.InjectLog.e("InjectDex", "init aborted: LHooker not initialized");

@@ -18,6 +18,13 @@ import com.kail.location.views.theme.locationTheme
 class WifiSimulationActivity : BaseActivity() {
     private val viewModel: WifiSimulationViewModel by viewModels()
 
+    override fun onResume() {
+        super.onResume()
+        // WifiPickerActivity 用独立 ViewModel 写 prefs，返回本页时刷新列表，
+        // 否则模拟中添加的 WiFi 不会显示。
+        viewModel.reloadFromPrefs()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 

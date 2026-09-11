@@ -1207,6 +1207,7 @@ public class ClientMockHook {
     }
 
     private static void log(Object... objArr) {
+        if (!com.kail.location.inject.utils.InjectLog.hookLogEnabled) return;
         com.kail.location.inject.utils.InjectLog.log("ClientMockHook", objArr);
     }
 
