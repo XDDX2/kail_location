@@ -12,6 +12,8 @@
 #include <cmath>
 #include <atomic>
 #include <mutex>
+#include <chrono>
+#include <unistd.h>
 
 #include "sensor_simulator.h"
 #include "kail_log.h"
@@ -91,8 +93,54 @@ static int     pending_step_counter_events = 0;
 static int     step_emit_phase = 0;     // 0 = counter next, 1 = detector next
 static const int64_t kStepMaxGapNs = 5LL * 1000000000LL; // clamp idle gaps to 5s
 
+static std::atomic<uint64_t> g_so_entries{0};
+static std::atomic<uint64_t> g_convert_entries{0};
+static std::atomic<uint64_t> g_so_calls{0};
+static std::atomic<uint64_t> g_so_alloc{0};
+static std::atomic<uint64_t> g_so_free{0};
+static std::atomic<uint64_t> g_so_live_bytes{0};
+static std::atomic<uint64_t> g_so_total_bytes{0};
+static std::atomic<uint64_t> g_dobby_hook_calls{0};
+static std::atomic<uint64_t> g_native_init_calls{0};
+static std::atomic<int64_t>  g_last_diag_ms{0};
+
 #define ALOGI_TO_FILE(...) ALOGI(__VA_ARGS__)
 #define ALOGE_TO_FILE(...) ALOGE(__VA_ARGS__)
+
+static void logLeakDiag() {
+    long rss_pages = 0;
+    FILE* fp = fopen("/proc/self/statm", "re");
+    if (fp) {
+        long total_pages = 0;
+        if (fscanf(fp, "%ld %ld", &total_pages, &rss_pages) != 2) rss_pages = 0;
+        fclose(fp);
+    }
+    long page_kb = (long)(sysconf(_SC_PAGESIZE) / 1024);
+    uint64_t alloc = g_so_alloc.load(std::memory_order_relaxed);
+    uint64_t freed = g_so_free.load(std::memory_order_relaxed);
+    KLOGI(kHookTag,
+          "[LEAK] so_entry=%llu conv_entry=%llu calls=%llu alloc=%llu free=%llu live=%lld live_bytes=%llu total_bytes=%llu dobby=%llu init=%llu rss_kb=%ld",
+          (unsigned long long)g_so_entries.load(std::memory_order_relaxed),
+          (unsigned long long)g_convert_entries.load(std::memory_order_relaxed),
+          (unsigned long long)g_so_calls.load(std::memory_order_relaxed),
+          (unsigned long long)alloc,
+          (unsigned long long)freed,
+          (long long)((int64_t)alloc - (int64_t)freed),
+          (unsigned long long)g_so_live_bytes.load(std::memory_order_relaxed),
+          (unsigned long long)g_so_total_bytes.load(std::memory_order_relaxed),
+          (unsigned long long)g_dobby_hook_calls.load(std::memory_order_relaxed),
+          (unsigned long long)g_native_init_calls.load(std::memory_order_relaxed),
+          (long)(rss_pages * page_kb));
+}
+
+static void maybeLogLeakDiag() {
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t last = g_last_diag_ms.load(std::memory_order_relaxed);
+    if (now_ms - last < 10000) return;
+    if (!g_last_diag_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) return;
+    logLeakDiag();
+}
 
 static bool is_plausible_userspace_ptr(const void* ptr) {
     uintptr_t value = (uintptr_t)ptr;
@@ -250,6 +298,8 @@ static bool synthesizeStepEventFromCarrierLocked(void* eventOut, int carrierType
 }
 
 extern "C" void hooked_send_objects(long* param_1, void* param_2, long param_3, long param_4) {
+    g_so_entries.fetch_add(1, std::memory_order_relaxed);
+
     if (!route_simulation_active.load(std::memory_order_acquire)) {
         if (original_send_objects) {
             original_send_objects(param_1, param_2, param_3, param_4);
@@ -283,6 +333,10 @@ extern "C" void hooked_send_objects(long* param_1, void* param_2, long param_3, 
     }
 
     char* heap_buffer = new char[buffer_size];
+    g_so_calls.fetch_add(1, std::memory_order_relaxed);
+    g_so_alloc.fetch_add(1, std::memory_order_relaxed);
+    g_so_live_bytes.fetch_add(buffer_size, std::memory_order_relaxed);
+    g_so_total_bytes.fetch_add(buffer_size, std::memory_order_relaxed);
     memcpy(heap_buffer, param_2, buffer_size);
 
     for (int i = 0; i < count; i++) {
@@ -338,7 +392,10 @@ extern "C" void hooked_send_objects(long* param_1, void* param_2, long param_3, 
     }
 
     memcpy(param_2, heap_buffer, buffer_size);
+    g_so_free.fetch_add(1, std::memory_order_relaxed);
+    g_so_live_bytes.fetch_sub(buffer_size, std::memory_order_relaxed);
     delete[] heap_buffer;
+    maybeLogLeakDiag();
 
     if (!original_send_objects) {
         return;
@@ -348,6 +405,9 @@ extern "C" void hooked_send_objects(long* param_1, void* param_2, long param_3, 
 }
 
 extern "C" void hooked_convert_to_sensor_event(void* param_1, void* param_2) {
+    g_convert_entries.fetch_add(1, std::memory_order_relaxed);
+    maybeLogLeakDiag();
+
     if (!is_plausible_userspace_ptr(param_2)) {
         KLOGW(kHookTag, "[DIAG] convertToSensorEvent invalid out ptr=%p, drop event", param_2);
         return;
@@ -461,6 +521,7 @@ static void install_send_objects_hook() {
               (unsigned long long)send_objects_offset);
     }
 
+    g_dobby_hook_calls.fetch_add(1, std::memory_order_relaxed);
     int ret = DobbyHook(addr, (void*)hooked_send_objects, (void**)&original_send_objects);
     
     if (ret == 0) {
@@ -517,6 +578,7 @@ static void install_convert_to_sensor_event_hook() {
               (unsigned long long)convert_to_sensor_event_offset);
     }
 
+    g_dobby_hook_calls.fetch_add(1, std::memory_order_relaxed);
     int ret = DobbyHook(addr, (void*)hooked_convert_to_sensor_event, (void**)&original_convert_to_sensor_event);
     
     if (ret == 0) {
@@ -626,6 +688,7 @@ Java_com_kail_location_inject_utils_NativeStepHook_nativeReset(
 JNIEXPORT jboolean JNICALL
 Java_com_kail_location_inject_utils_NativeStepHook_nativeInitHook(
     JNIEnv* env, jclass clazz) {
+    g_native_init_calls.fetch_add(1, std::memory_order_relaxed);
     initSensorSimulator();
     // Always attempt installation: the install functions resolve the target
     // address at runtime from the in-memory ELF dynsym, so they no longer need
@@ -755,6 +818,7 @@ Java_com_kail_location_root_NativeSensorHook_nativeInitHook(
     JNIEnv* env,
     jclass clazz
 ) {
+    g_native_init_calls.fetch_add(1, std::memory_order_relaxed);
     initSensorSimulator();
     
     install_send_objects_hook();
