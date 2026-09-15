@@ -882,7 +882,7 @@ internal object LocationServiceHook: BaseLocationHook() {
 
         KailLog.e(null, "Kail_Xposed", "=== hookILocationListener ENTER: ${classListener.name} ===")
         
-        if(XposedBridge.hookAllMethods(classListener, "onLocationChanged", object: XC_MethodHook() {
+        if(classListener.onceHookAllMethod("onLocationChanged", object: XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     KailLog.e(null, "Kail_Xposed", "=== onLocationChanged TRIGGERED: enable=${FakeLoc.enable} ===")
                     if (param.args.isEmpty()) return
