@@ -1980,32 +1980,36 @@ public class MockLocationHookManager {
         try {
             if (Build.VERSION.SDK_INT < 31) {
                 HashMap<Object, String> map = receiverPackages;
+                HashMap<Object, String> snapshot;
                 synchronized (map) {
-                    for (Object obj : map.keySet()) {
-                        if (isAllowMockPackage(receiverPackages.get(obj))) {
-                            try {
-                                ReflectionUtils.invokeMethod(obj, locationManagerReceiverClass, "callLocationChangedLocked", new Class[]{Location.class}, new Object[]{location});
-                            } catch (Throwable th) {
-                                th.printStackTrace();
-                            }
+                    snapshot = new HashMap<>(map);
+                }
+                for (Object obj : snapshot.keySet()) {
+                    if (isAllowMockPackage(snapshot.get(obj))) {
+                        try {
+                            ReflectionUtils.invokeMethod(obj, locationManagerReceiverClass, "callLocationChangedLocked", new Class[]{Location.class}, new Object[]{location});
+                        } catch (Throwable th) {
+                            th.printStackTrace();
                         }
                     }
                 }
                 return;
             }
             HashMap<Object, String> map2 = LocationListenerHooks.listenerPackages;
+            HashMap<Object, String> snapshot2;
             synchronized (map2) {
-                for (Object obj2 : map2.keySet()) {
-                    if (isAllowMockPackage(LocationListenerHooks.listenerPackages.get(obj2))) {
-                        try {
-                            if (obj2.getClass().getName().contains("LocationListenerTransport")) {
-                                ReflectionUtils.invokeMethod(obj2, locationListenerTransportClass, "onLocationChanged", new Class[]{List.class, iRemoteCallbackClass}, new Object[]{Arrays.asList(location), null});
-                            } else {
-                                ReflectionUtils.invokeMethod(obj2, iLocationListenerStubProxyClass, "onLocationChanged", new Class[]{List.class, iRemoteCallbackClass}, new Object[]{Arrays.asList(location), null});
-                            }
-                        } catch (Throwable th2) {
-                            th2.printStackTrace();
+                snapshot2 = new HashMap<>(map2);
+            }
+            for (Object obj2 : snapshot2.keySet()) {
+                if (isAllowMockPackage(snapshot2.get(obj2))) {
+                    try {
+                        if (obj2.getClass().getName().contains("LocationListenerTransport")) {
+                            ReflectionUtils.invokeMethod(obj2, locationListenerTransportClass, "onLocationChanged", new Class[]{List.class, iRemoteCallbackClass}, new Object[]{Arrays.asList(location), null});
+                        } else {
+                            ReflectionUtils.invokeMethod(obj2, iLocationListenerStubProxyClass, "onLocationChanged", new Class[]{List.class, iRemoteCallbackClass}, new Object[]{Arrays.asList(location), null});
                         }
+                    } catch (Throwable th2) {
+                        th2.printStackTrace();
                     }
                 }
             }
