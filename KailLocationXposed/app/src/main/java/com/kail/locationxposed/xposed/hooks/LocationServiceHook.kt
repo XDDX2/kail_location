@@ -288,12 +288,14 @@ internal object LocationServiceHook: BaseLocationHook() {
     }
 
      fun onService(cILocationManager: Class<*>) {
-         KailLog.e(null, "Kail_Xposed", "=== onService ENTER: class=$cILocationManager ===")
+         if (FakeLoc.enableDebugLog) {
+             KailLog.d(null, "Kail_Xposed", "=== onService ENTER: class=$cILocationManager ===")
+         }
          // Got instance of ILocationManager.Stub here, you can hook it
          // Not directly Class.forName because of this thing, it can't be reflected, even if I'm system_server?!?!
          // Verify this is really system_server context
-         if (BinderUtils.getUidPackageNames() != null) {
-             KailLog.e(null, "Kail_Xposed", "=== onService in system_server: pkg=${BinderUtils.getUidPackageNames()?.joinToString()} ===")
+         if (FakeLoc.enableDebugLog && BinderUtils.getUidPackageNames() != null) {
+             KailLog.d(null, "Kail_Xposed", "=== onService in system_server: pkg=${BinderUtils.getUidPackageNames()?.joinToString()} ===")
          }
  
          if (FakeLoc.enableDebugLog) {
@@ -319,11 +321,15 @@ internal object LocationServiceHook: BaseLocationHook() {
                 // It can't be null, because I'm judging in the previous step
                 val location = result as? Location ?: Location("gps")
                 val caller = BinderUtils.getUidPackageNames()?.joinToString() ?: "unknown"
-                KailLog.i(null, "DEBUG", "=== getLastLocation before: ${location.latitude},${location.longitude} caller=$caller")
+                if (FakeLoc.enableDebugLog) {
+                    KailLog.d(null, "Kail_Xposed", "=== getLastLocation before: ${location.latitude},${location.longitude} caller=$caller")
+                }
 
                 result = injectLocation(location)
 
-                KailLog.i(null, "DEBUG", "=== getLastLocation after: ${(result as? Location)?.latitude},${(result as? Location)?.longitude}")
+                if (FakeLoc.enableDebugLog) {
+                    KailLog.d(null, "Kail_Xposed", "=== getLastLocation after: ${(result as? Location)?.latitude},${(result as? Location)?.longitude}")
+                }
         }).isEmpty()) {
             KailLog.e(null, "Kail_Xposed", "hook getLastLocation failed")
         }
@@ -441,7 +447,9 @@ internal object LocationServiceHook: BaseLocationHook() {
                 return@beforeHook
             }
 
-            KailLog.e(null, "Kail_Xposed", "=== registerLocationListener ENTER: provider=$listener from=${BinderUtils.getUidPackageNames()?.joinToString() ?: "unknown"} ===")
+            if (FakeLoc.enableDebugLog) {
+                KailLog.d(null, "Kail_Xposed", "=== registerLocationListener ENTER: provider=$listener from=${BinderUtils.getUidPackageNames()?.joinToString() ?: "unknown"} ===")
+            }
             
             if(FakeLoc.enableDebugLog) {
                 KailLog.d(null, "Kail_Xposed", "registerLocationListener: injected! $listener, from ${BinderUtils.getUidPackageNames()}")
@@ -877,14 +885,13 @@ internal object LocationServiceHook: BaseLocationHook() {
 
     private fun hookILocationListener(listener: Any) {
         val classListener = listener.javaClass
-        if (FakeLoc.enableDebugLog)
+        if (FakeLoc.enableDebugLog) {
             KailLog.d(null, "Kail_Xposed", "will hook ILocationListener: ${classListener.name}")
-
-        KailLog.e(null, "Kail_Xposed", "=== hookILocationListener ENTER: ${classListener.name} ===")
+            KailLog.d(null, "Kail_Xposed", "=== hookILocationListener ENTER: ${classListener.name} ===")
+        }
         
         if(classListener.onceHookAllMethod("onLocationChanged", object: XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    KailLog.e(null, "Kail_Xposed", "=== onLocationChanged TRIGGERED: enable=${FakeLoc.enable} ===")
                     if (param.args.isEmpty()) return
                     if (!FakeLoc.enable) return
 
@@ -894,17 +901,21 @@ internal object LocationServiceHook: BaseLocationHook() {
                                 param.result = null
                                 return
                             }
-                            KailLog.e(null, "Kail_Xposed", "=== onLocationChanged before: ${location.latitude},${location.longitude}")
+                            if (FakeLoc.enableDebugLog) {
+                                KailLog.d(null, "Kail_Xposed", "=== onLocationChanged before: ${location.latitude},${location.longitude}")
+                            }
                             param.args[0] = injectLocation(location)
                             val after = param.args[0] as Location
-                            KailLog.e(null, "Kail_Xposed", "=== onLocationChanged after: ${after.latitude},${after.longitude}")
+                            if (FakeLoc.enableDebugLog) {
+                                KailLog.d(null, "Kail_Xposed", "=== onLocationChanged after: ${after.latitude},${after.longitude}")
+                            }
                         }
 
                         is List<*> -> {
                             val locations = param.args[0] as List<*>
                             param.args[0] = locations.map { injectLocation(it as Location) }
                         }
-                        else -> KailLog.e(null, "Kail_Xposed", "onLocationChanged args is not `Location`")
+                        else -> if (FakeLoc.enableDebugLog) KailLog.d(null, "Kail_Xposed", "onLocationChanged args is not `Location`")
                     }
 
                     if (FakeLoc.enableDebugLog) {
@@ -912,10 +923,14 @@ internal object LocationServiceHook: BaseLocationHook() {
                     }
                 }
             }).isEmpty()) {
-            KailLog.e(null, "Kail_Xposed", "=== hook onLocationChanged FAILED ===")
+            if (FakeLoc.enableDebugLog) {
+                KailLog.d(null, "Kail_Xposed", "=== hook onLocationChanged already hooked or failed ===")
+            }
             return // If the hook fails, the listener is not added
         } else {
-            KailLog.e(null, "Kail_Xposed", "=== hook onLocationChanged SUCCESS ===")
+            if (FakeLoc.enableDebugLog) {
+                KailLog.d(null, "Kail_Xposed", "=== hook onLocationChanged SUCCESS ===")
+            }
         }
     }
 
@@ -990,8 +1005,8 @@ internal object LocationServiceHook: BaseLocationHook() {
     }
 
     fun callOnLocationChanged() {
-        KailLog.e(null, "Kail_Xposed", "=== callOnLocationChanged ENTER: size=${locationListeners.size} ===")
         if (FakeLoc.enableDebugLog) {
+            KailLog.d(null, "Kail_Xposed", "=== callOnLocationChanged ENTER: size=${locationListeners.size} ===")
             KailLog.d(null, "Kail_Xposed", "==> callOnLocationChanged: ${locationListeners.size}")
         }
         locationListeners.forEach { listenerWithProvider ->
@@ -1004,9 +1019,13 @@ internal object LocationServiceHook: BaseLocationHook() {
                     Location(listenerWithProvider.first)
                 }
             }
-            KailLog.i(null, "DEBUG", "=== callOnLocationChanged before inject: ${location.latitude},${location.longitude}")
+            if (FakeLoc.enableDebugLog) {
+                KailLog.d(null, "DEBUG", "=== callOnLocationChanged before inject: ${location.latitude},${location.longitude}")
+            }
             location = injectLocation(location)
-            KailLog.i(null, "DEBUG", "=== callOnLocationChanged after inject: ${location.latitude},${location.longitude}")
+            if (FakeLoc.enableDebugLog) {
+                KailLog.d(null, "DEBUG", "=== callOnLocationChanged after inject: ${location.latitude},${location.longitude}")
+            }
             var called = false
             var error: Throwable? = null
             kotlin.runCatching {
@@ -1044,7 +1063,9 @@ internal object LocationServiceHook: BaseLocationHook() {
     }
 
     private fun hookLocationManagerServiceV2(classLoader: ClassLoader) {
-        KailLog.e(null, "Kail_Xposed", "=== hookLocationManagerServiceV2 ENTER ===")
+        if (FakeLoc.enableDebugLog) {
+            KailLog.d(null, "Kail_Xposed", "=== hookLocationManagerServiceV2 ENTER ===")
+        }
         // As a system_server, the hook can get all the location information here
         kotlin.runCatching {
             XposedHelpers.findClass("android.location.ILocationManager\$Stub", classLoader)
@@ -1093,7 +1114,9 @@ internal object LocationServiceHook: BaseLocationHook() {
             KailLog.e(null, "Kail_Xposed", "ILocationManager.Stub not found: ${it.message}")
         }
 
-        KailLog.e(null, "Kail_Xposed", "=== hookLocationManagerServiceV2 EXIT ===")
+        if (FakeLoc.enableDebugLog) {
+            KailLog.d(null, "Kail_Xposed", "=== hookLocationManagerServiceV2 EXIT ===")
+        }
 
 //        // This is the intrusive hook
 //        kotlin.runCatching {

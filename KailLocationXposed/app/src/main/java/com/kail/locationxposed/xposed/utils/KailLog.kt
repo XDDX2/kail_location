@@ -8,8 +8,10 @@ import java.io.FileOutputStream
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.util.TimeZone
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * KailLog —— Xposed 模块统一日志工具。
@@ -29,12 +31,17 @@ object KailLog {
     private const val TAG_PREFIX = "KailLog/"
     private const val HIGH_FREQ_FILE_INTERVAL_MS = 1000L
     private const val MAX_THROTTLE_KEYS = 512
+    private const val MAX_PENDING_FILE_WRITES = 2048
     private const val PUBLIC_LOG_DIR = "/sdcard/Documents/KailLocation/logs"
 
     @Volatile var fileLogEnabled = true
     @Volatile var detailedLogEnabled = true
 
-    private val logExecutor = Executors.newSingleThreadExecutor()
+    private val logExecutor = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue<Runnable>(MAX_PENDING_FILE_WRITES),
+        ThreadPoolExecutor.DiscardOldestPolicy()
+    )
     private val highFreqLastWriteMs = ConcurrentHashMap<String, Long>()
     private val highFreqSuppressed = ConcurrentHashMap<String, Int>()
     private val callerCache = ConcurrentHashMap<String, String>()
