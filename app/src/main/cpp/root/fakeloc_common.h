@@ -36,28 +36,11 @@ namespace fakeloc {
 
 static const char *kLogTag = "LINJECT.native";
 
-// Resolve the on-disk payload .dex path at runtime by scanning for
-// libfakeloc_v*.so.  This avoids baking a version-suffixed path at build time
-// and eliminates the need for a standard-name symlink.
+// The on-disk payload .dex is always deployed by RootDeployer to the fixed
+// path /data/kail-loc/libfakeloc.so (no version/hash suffix in the filename;
+// freshness is checked on-device by comparing the content md5 at deploy time).
 static const char *resolvePayloadPath() {
-  static char buf[256];
-  // First check whether we already resolved it.
-  if (buf[0] != '\0') return buf;
-
-  DIR *dir = opendir("/data/kail-loc");
-  if (!dir) return "/data/kail-loc/libfakeloc.so";   // fallback
-
-  struct dirent *ent;
-  while ((ent = readdir(dir)) != nullptr) {
-    if (strncmp(ent->d_name, "libfakeloc_v", 12) == 0 &&
-        strcmp(ent->d_name + strlen(ent->d_name) - 3, ".so") == 0) {
-      snprintf(buf, sizeof(buf), "/data/kail-loc/%s", ent->d_name);
-      closedir(dir);
-      return buf;
-    }
-  }
-  closedir(dir);
-  return "/data/kail-loc/libfakeloc.so";  // fallback
+  return "/data/kail-loc/libfakeloc.so";
 }
 #define kPayloadPath (fakeloc::resolvePayloadPath())
 

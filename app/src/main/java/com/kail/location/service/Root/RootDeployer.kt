@@ -12,6 +12,7 @@ import com.kail.location.utils.ShellUtils
 import com.kail.location.utils.SimulationDiagnostics
 import com.kail.location.viewmodels.SettingsViewModel
 import java.io.File
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 /**
@@ -87,17 +88,17 @@ object RootDeployer {
             return@synchronized false
         }
 
-        // ── 1. 版本化文件缺失或过期 → 全量重部署 ──
+        // ── 1. 内容已过期（某文件缺了/内容哈希不一致）→ 清空两个目录后全量重部署 ──
         if (!isInjectionStaged(context)) {
-            val v = currentAppVersionCode(context)
-            KailLog.i(null, TAG, "ensureBaseline: deploying version $v")
+            val h = currentDeployHash(context)
+            KailLog.i(null, TAG, "ensureBaseline: deploying toolchain hash=$h")
             resetDeployDirs()
             syncInjectLogMarkers(context)
             deployNativeHookLib(context)
             deployInjectorBin(context)
             deployFakelocLibs(context)
             deployDexPayload(context)
-            KailLog.i(null, TAG, "ensureBaseline: full deploy complete (version $v)")
+            KailLog.i(null, TAG, "ensureBaseline: full deploy complete (hash=$h)")
         } else {
             // Files are current — keep inject.dex atomically in sync for
             // per-app injection (which loads the dex on every hookApplication).
@@ -282,9 +283,8 @@ object RootDeployer {
             val injector: File
             val initLoader: File
             if (context != null) {
-                val v = currentAppVersionCode(context)
-                injector = File(STAGING_DIR, "kail_inject_v${v}")
-                initLoader = File(FAKELOC_DIR, "libfakeloc_init_v${v}.so")
+                injector = File(STAGING_DIR, INJECTOR_BIN)
+                initLoader = File(FAKELOC_DIR, "libfakeloc_init.so")
             } else {
                 injector = File(STAGING_DIR, INJECTOR_BIN)
                 initLoader = File(FAKELOC_DIR, "libfakeloc_init.so")
@@ -367,6 +367,12 @@ object RootDeployer {
                 "done",
             timeoutMs = 1500L
         )
+        // 删除历史版本按 versionName 生成的 location_control_*.txt / ack 残留
+        // （现在是固定文件名 location_control.txt，见 RootControlPaths）。
+        rootCmd(
+            "rm -f $RUNTIME_DIR/location_control_*.txt $RUNTIME_DIR/location_control_ack_*.txt 2>/dev/null || true",
+            timeoutMs = 1500L
+        )
     }
 
     /**
@@ -394,7 +400,7 @@ object RootDeployer {
         KailLog.i(null, TAG, "tryXposedBridge: key exchanged")
 
         // Step 2: call load_dex
-        val dexPath = File(FAKELOC_DIR, "libfakeloc_v${currentAppVersionCode(ctx)}.so").absolutePath
+        val dexPath = File(FAKELOC_DIR, "libfakeloc.so").absolutePath
         val className = "com.kail.location.inject.fakelocation.InjectDex"
         val nativeLibDir = FAKELOC_DIR
         val loadOk = runCatching {
@@ -483,11 +489,10 @@ object RootDeployer {
      */
     fun injectAppProcess(context: Context, processName: String): Boolean {
         if (!ShellUtils.hasRoot()) return false
-        val v = currentAppVersionCode(context)
-        val injector = File(STAGING_DIR, "kail_inject_v${v}")
+        val injector = File(STAGING_DIR, INJECTOR_BIN)
         // libfakeloc_apphook.so -> InjectDex.hookApplication (installs the
         // per-process hooks, including PhoneInterfaceManagerHook for phone).
-        val appLoader = File(FAKELOC_DIR, "libfakeloc_apphook_v${v}.so")
+        val appLoader = File(FAKELOC_DIR, "libfakeloc_apphook.so")
         if (!injector.exists() || !appLoader.exists()) {
             KailLog.e(null, TAG, "injectAppProcess: injector or apphook loader missing")
             return false
@@ -545,9 +550,8 @@ object RootDeployer {
      */
     fun injectZygote(context: Context): Boolean {
         if (!ShellUtils.hasRoot()) return false
-        val v = currentAppVersionCode(context)
-        val injector = File(STAGING_DIR, "kail_inject_v${v}")
-        val zygoteLoader = File(FAKELOC_DIR, "libfakeloc_initzygote_v${v}.so")
+        val injector = File(STAGING_DIR, INJECTOR_BIN)
+        val zygoteLoader = File(FAKELOC_DIR, "libfakeloc_initzygote.so")
         if (!injector.exists() || !zygoteLoader.exists()) {
             KailLog.e(null, TAG, "injectZygote: injector or zygote loader missing")
             return false
@@ -585,17 +589,19 @@ object RootDeployer {
             if (index <= 0) null else line.substring(0, index) to line.substring(index + 1)
         }.toMap()
         val boot = values["kernel_btime_sec"]?.toLongOrNull() ?: return false
-        val appVersionCode = values["app_version_code"]?.trim()?.toIntOrNull() ?: return false
+        val deployHash = values["deploy_hash"]?.trim() ?: return false
         val recordedPids = values["zygote_pid"]?.trim()?.split(",")?.map { it.trim() }.orEmpty()
+        val currentHash = currentDeployHash(context)
         val current = boot > 0 &&
             boot == kernelBootTimeSec() &&
-            appVersionCode == currentAppVersionCode(context) &&
+            deployHash.isNotEmpty() &&
+            deployHash == currentHash &&
             recordedPids.isNotEmpty() &&
             recordedPids.any { it == findZygotePid(zygoteProcessName()) }
         if (!current) {
             KailLog.i(
                 null, TAG,
-                "zygote state stale: state=$values boot=$boot appVer=$appVersionCode " +
+                "zygote state stale: state=$values boot=$boot hash=$deployHash currentHash=$currentHash " +
                     "currentZygote=${findZygotePid(zygoteProcessName())} recorded=${recordedPids.joinToString(",")}"
             )
         }
@@ -610,10 +616,10 @@ object RootDeployer {
         if (zygotePids.isEmpty()) return
         val boot = kernelBootTimeSec()
         if (boot <= 0) return
-        val appVersionCode = currentAppVersionCode(context)
+        val deployHash = currentDeployHash(context)
         val payload = "kernel_btime_sec=$boot\n" +
             "zygote_pid=${zygotePids.joinToString(",")}\n" +
-            "app_version_code=$appVersionCode\n" +
+            "deploy_hash=$deployHash\n" +
             "wallclock_ms=${System.currentTimeMillis()}\n"
         rootCmd(
             "printf '%s' ${shellQuote(payload)} > $ZYGOTE_STATE_FILE && " +
@@ -621,7 +627,7 @@ object RootDeployer {
         )
         KailLog.i(
             null, TAG,
-            "zygote injection marked current: boot=$boot pids=${zygotePids.joinToString(",")} appVer=$appVersionCode"
+            "zygote injection marked current: boot=$boot pids=${zygotePids.joinToString(",")} hash=$deployHash"
         )
     }
 
@@ -651,21 +657,27 @@ object RootDeployer {
 
     /**
      * Side-effect free check for whether the ptrace-injection prerequisites
-     * have already been staged on disk.
+     * have already been staged on disk. 现场取哈希对比：每个关键文件与 APK 内源
+     * 的内容 md5 一致才算就绪；任一不一致 → 全量重部署。
      */
     fun isInjectionStaged(context: Context): Boolean {
-        val v = currentAppVersionCode(context)
-        if (!File(FAKELOC_DIR, "libfakeloc_v${v}.so").exists()) return false
-        if (!File(FAKELOC_DIR, "libfakeloc_init_v${v}.so").exists()) return false
-        if (!File(FAKELOC_DIR, "libfakeloc_initzygote_v${v}.so").exists()) return false
-        if (!File(STAGING_DIR, "kail_inject_v${v}").exists()) return false
+        val checks = listOf(
+            "$FAKELOC_DIR/libfakeloc.so" to payloadHash(context),
+            "$FAKELOC_DIR/libfakeloc_init.so" to deployHash(context, "libfakeloc_init.so"),
+            "$FAKELOC_DIR/libfakeloc_initzygote.so" to deployHash(context, "libfakeloc_initzygote.so"),
+            "$STAGING_DIR/$INJECTOR_BIN" to deployHash(context, "libkail_inject.so")
+        )
+        for ((path, expected) in checks) {
+            if (expected.isEmpty()) return false
+            if (fileMd5OnDevice(path) != expected) return false
+        }
         return true
     }
 
     private data class InjectionState(
         val bootTimeSec: Long,
         val systemServerPid: String,
-        val appVersionCode: Int
+        val deployHash: String
     )
 
     // ------------------------------------------------------------------
@@ -673,18 +685,18 @@ object RootDeployer {
     // ------------------------------------------------------------------
 
     fun deployNativeHookLib(context: Context): Boolean {
-        val v = currentAppVersionCode(context)
         val src = File(context.applicationInfo.nativeLibraryDir, NATIVE_HOOK_SO)
-        val versionedDst = File(STAGING_DIR, "libkail_native_hook_v${v}.so")
+        val versionedDst = File(STAGING_DIR, NATIVE_HOOK_SO)
         val ok = copyAndChmod(context, src, "lib/${preferredAbi()}/$NATIVE_HOOK_SO", versionedDst)
-        // Also stage a version-scoped copy under FAKELOC_DIR so it can be
-        // System.load()ed from inside system_server by the inject. Never
-        // overwrite an existing copy for the same version: system_server may
-        // already have it mapped and executing in SensorService, and truncating
-        // that file is enough to crash the process on the next page fault.
+        // Also stage a copy under FAKELOC_DIR so it can be System.load()ed from
+        // inside system_server by the inject. system_server may already have the
+        // file mapped, so only write it when missing/stale (hash mismatch) —
+        // truncating a mapped file crashes the process on the next page fault.
         runCatching {
-            val fakelocDst = File(FAKELOC_DIR, nativeHookSoName(context))
-            if (!fakelocDst.exists() || fakelocDst.length() <= 0L) {
+            val fakelocDst = File(FAKELOC_DIR, NATIVE_HOOK_SO)
+            val expected = deployHash(context, NATIVE_HOOK_SO)
+            val current = fileMd5OnDevice(fakelocDst.absolutePath)
+            if (fakelocDst.length() <= 0L || expected.isNotEmpty() && current != expected) {
                 rootCmd("cp -f ${versionedDst.absolutePath} ${fakelocDst.absolutePath}", ROOT_COPY_TIMEOUT_MS)
                 rootCmd("chmod 644 ${fakelocDst.absolutePath}")
                 rootCmd("chcon u:object_r:system_file:s0 ${fakelocDst.absolutePath} 2>/dev/null || true")
@@ -697,9 +709,8 @@ object RootDeployer {
 
     fun deployInjectorBin(context: Context): Boolean {
         val abi = preferredAbi()
-        val v = currentAppVersionCode(context)
         val src = File(context.applicationInfo.nativeLibraryDir, "libkail_inject.so")
-        val versioned = File(STAGING_DIR, "${INJECTOR_BIN}_v${v}")
+        val versioned = File(STAGING_DIR, INJECTOR_BIN)
         val ok = copyAndChmod(context, src, "lib/$abi/libkail_inject.so", versioned)
         if (ok) rootCmd("chmod 755 ${versioned.absolutePath}")
         return ok
@@ -741,11 +752,9 @@ object RootDeployer {
     fun deployFakelocLibs(context: Context): Boolean {        var initLoader = false
         val abi = preferredAbi()
         val isArm64 = abi == "arm64-v8a"
-        val v = currentAppVersionCode(context)
         for (name in FAKELOC_LIBS) {
             val src = File(context.applicationInfo.nativeLibraryDir, name)
-            val versionedName = versionedName(name, v)
-            val versioned = File(FAKELOC_DIR, versionedName)
+            val versioned = File(FAKELOC_DIR, name)
             val ok = copyAndChmod(context, src, "lib/$abi/$name", versioned)
             if (ok && name == "libfakeloc_init.so") initLoader = true
 
@@ -755,8 +764,7 @@ object RootDeployer {
             // succeeds regardless of which path it picks first.
             if (ok && isArm64 && !name.contains("64.so")) {
                 val sixtyFour = name.replace(".so", "64.so")
-                val sixtyFourVersioned = versionedName(sixtyFour, v)
-                val mirror = File(FAKELOC_DIR, sixtyFourVersioned)
+                val mirror = File(FAKELOC_DIR, sixtyFour)
                 rootCmd("cp -f ${versioned.absolutePath} ${mirror.absolutePath}", ROOT_COPY_TIMEOUT_MS)
                 rootCmd("chmod 777 ${mirror.absolutePath}")
                 rootCmd("chcon u:object_r:system_file:s0 ${mirror.absolutePath} 2>/dev/null || true")
@@ -765,8 +773,7 @@ object RootDeployer {
             // engine; mirror the freshly deployed liblhooker.so under that name
             // so the injected bootstrap finds it on x86_64 emulators/devices.
             if (ok && abi == "x86_64" && name == "liblhooker.so") {
-                val x64Versioned = versionedName("liblhookerx64.so", v)
-                val mirror = File(FAKELOC_DIR, x64Versioned)
+                val mirror = File(FAKELOC_DIR, "liblhookerx64.so")
                 rootCmd("cp -f ${versioned.absolutePath} ${mirror.absolutePath}", ROOT_COPY_TIMEOUT_MS)
                 rootCmd("chmod 777 ${mirror.absolutePath}")
                 rootCmd("chcon u:object_r:system_file:s0 ${mirror.absolutePath} 2>/dev/null || true")
@@ -790,25 +797,21 @@ object RootDeployer {
     }
 
     /**
-     * Atomically replace /data/kail-loc/libfakeloc.so with the APK's
-     * assets/inject.dex when they differ. Unlike [deployDexPayload] (cp -f,
-     * truncates in place), this writes a temp file and mv's it over the
-     * destination so a process that has the old dex mmapped (system_server)
-     * keeps its intact mapping — only new readers see the new dex.
+     * 把 /data/kail-loc/libfakeloc.so 与 APK 的 assets/inject.dex 保持同步。
+     * 用"现场取哈希"判断是否需要更新：先算目标文件 md5，与 APK 内源 md5 不一致才写。
+     * 写入走 temp+mv，避免截断一个正在被 mmap 的旧 dex（system_server）。
      */
     fun refreshDexPayloadAtomic(context: Context) {
         runCatching {
-            val v = currentAppVersionCode(context)
             val slim = File(context.cacheDir, "inject.dex")
             context.assets.open("inject.dex").use { input ->
                 slim.outputStream().use { input.copyTo(it) }
             }
             if (!slim.exists() || slim.length() <= 0) return@runCatching
-            val versioned = File(FAKELOC_DIR, "libfakeloc_v${v}.so")
-            // Compare md5 via su (app can't read the device file directly on
-            // all SELinux policies, and versioned may not exist at all yet).
-            val localMd5 = rootCmd("md5sum ${slim.absolutePath} | cut -d' ' -f1", 5000L).trim()
-            val dstMd5 = rootCmd("md5sum ${versioned.absolutePath} 2>/dev/null | cut -d' ' -f1", 5000L).trim()
+            val versioned = File(FAKELOC_DIR, "libfakeloc.so")
+            // 现场取哈希：本地 cache 的 slim 与设备上的 payload 对比。
+            val localMd5 = fileMd5(slim)
+            val dstMd5 = fileMd5OnDevice(versioned.absolutePath)
             if (localMd5.isNotEmpty() && localMd5 == dstMd5) return@runCatching
             val tmp = "${versioned.absolutePath}.new"
             rootCmd("cp -f ${slim.absolutePath} $tmp", ROOT_COPY_TIMEOUT_MS)
@@ -820,8 +823,7 @@ object RootDeployer {
     }
 
     fun deployDexPayload(context: Context): Boolean {
-        val v = currentAppVersionCode(context)
-        val versioned = File(FAKELOC_DIR, "libfakeloc_v${v}.so")
+        val versioned = File(FAKELOC_DIR, "libfakeloc.so")
         // Prefer the slim inject.dex we ship in assets — it contains only the
         // FakeLocation bootstrap classes (com.kail.location.inject.* +
         // com.kail.location.lib.lhooker.*), about 1-2 MB compared to the full
@@ -922,14 +924,15 @@ object RootDeployer {
         val state = readInjectionState() ?: return false
         val boot = kernelBootTimeSec()
         val pid = systemServerPid()
-        val appVersionCode = currentAppVersionCode(context)
+        val deployHash = currentDeployHash(context)
         val current = boot > 0 &&
             state.bootTimeSec == boot &&
             pid.isNotBlank() &&
             state.systemServerPid == pid &&
-            state.appVersionCode == appVersionCode
+            state.deployHash.isNotEmpty() &&
+            state.deployHash == deployHash
         if (!current) {
-            KailLog.i(null, TAG, "injection state stale: state=$state boot=$boot pid=$pid appVer=$appVersionCode")
+            KailLog.i(null, TAG, "injection state stale: state=$state boot=$boot pid=$pid hash=$deployHash")
         }
         return current
     }
@@ -1018,16 +1021,16 @@ object RootDeployer {
             KailLog.w(null, TAG, "mark injection skipped: boot=$boot pid=$pid")
             return
         }
-        val appVersionCode = currentAppVersionCode(context)
+        val deployHash = currentDeployHash(context)
         val payload = "kernel_btime_sec=$boot\n" +
             "system_server_pid=$pid\n" +
-            "app_version_code=$appVersionCode\n" +
+            "deploy_hash=$deployHash\n" +
             "wallclock_ms=${System.currentTimeMillis()}\n"
         rootCmd(
             "printf '%s' ${shellQuote(payload)} > $INJECTION_STATE_FILE && " +
                 "chmod 666 $INJECTION_STATE_FILE && chcon u:object_r:system_data_file:s0 $INJECTION_STATE_FILE 2>/dev/null || true"
         )
-        KailLog.i(null, TAG, "system_server injection marked current: boot=$boot pid=$pid appVer=$appVersionCode")
+        KailLog.i(null, TAG, "system_server injection marked current: boot=$boot pid=$pid hash=$deployHash")
     }
 
     private fun readInjectionState(): InjectionState? {
@@ -1040,30 +1043,13 @@ object RootDeployer {
         val boot = values["kernel_btime_sec"]?.toLongOrNull() ?: return null
         val pid = values["system_server_pid"]?.trim() ?: return null
         if (pid.isBlank()) return null
-        val appVersionCode = values["app_version_code"]?.trim()?.toIntOrNull() ?: return null
-        return InjectionState(boot, pid, appVersionCode)
-    }
-
-    private fun currentAppVersionCode(context: Context): Int {
-        return runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionCode
-        }.getOrDefault(0)
-    }
-
-    private fun versionedName(baseName: String, versionCode: Int): String {
-        val dot = baseName.lastIndexOf('.')
-        return if (dot >= 0) "${baseName.substring(0, dot)}_v${versionCode}${baseName.substring(dot)}"
-        else "${baseName}_v${versionCode}"
+        val deployHash = values["deploy_hash"]?.trim() ?: return null
+        return InjectionState(boot, pid, deployHash)
     }
 
     private fun resetDeployDirs() {
         rootCmd("rm -rf $FAKELOC_DIR $STAGING_DIR 2>/dev/null || true")
         prepareDirs()
-    }
-
-    /** Standard name → versioned name symlink (relative) so native code paths still resolve. */
-    private fun nativeHookSoName(context: Context): String {
-        return "libkail_native_hook_v${currentAppVersionCode(context)}.so"
     }
 
     private fun kernelBootTimeSec(): Long {
@@ -1084,9 +1070,7 @@ object RootDeployer {
 
     private fun prepareSessionLHooker(context: Context?): String? {
         return runCatching {
-            val baseName = preferredLHookerName()
-            val v = context?.let { currentAppVersionCode(it) }
-            val resolvedName = if (v != null) versionedName(baseName, v) else baseName
+            val resolvedName = preferredLHookerName()
             val base = File(FAKELOC_DIR, resolvedName)
             if (!base.exists() || base.length() <= 0) {
                 KailLog.w(null, TAG, "prepareSessionLHooker: missing ${base.absolutePath}")
@@ -1155,5 +1139,77 @@ object RootDeployer {
             }
             dst.exists() && dst.length() > 0
         }.getOrDefault(false)
+    }
+
+    // ------------------------------------------------------------------
+    // 现场取哈希（内容校验）
+    // ------------------------------------------------------------------
+
+    private fun md5Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    /** 目标 so 的内容 md5（源：APK zip 条目优先，否则 nativeLibraryDir 文件）。 */
+    private fun deployHash(context: Context, baseName: String): String {
+        val abi = preferredAbi()
+        val src = File(context.applicationInfo.nativeLibraryDir, baseName)
+        val bytes = sourceBytes(context, "lib/$abi/$baseName", src)
+        return bytes?.let { md5Hex(it) } ?: ""
+    }
+
+    /** 本地文件的内容 md5（不用 root，读 App 自己的文件）。 */
+    private fun fileMd5(file: File): String = runCatching {
+        md5Hex(file.readBytes())
+    }.getOrDefault("")
+
+    /** 设备上任意路径文件的内容 md5（经 root md5sum，读 /data 下部署产物）。 */
+    private fun fileMd5OnDevice(path: String): String {
+        return rootCmd("md5sum $path 2>/dev/null | cut -d' ' -f1", 5000L).trim()
+    }
+
+    /** inject.dex（或回退到整包 APK）的内容 md5。 */
+    private fun payloadHash(context: Context): String {
+        val bytes = payloadBytes(context) ?: return ""
+        return md5Hex(bytes)
+    }
+
+    /** 与 [deployDexPayload] / [refreshDexPayloadAtomic] 一致的 payload 字节。 */
+    private fun payloadBytes(context: Context): ByteArray? {
+        val slim = runCatching {
+            val out = File(context.cacheDir, "inject.dex")
+            context.assets.open("inject.dex").use { input ->
+                out.outputStream().use { input.copyTo(it) }
+            }
+            out
+        }.getOrNull()
+        if (slim != null && slim.exists() && slim.length() > 0) return slim.readBytes()
+        val apkPath = context.applicationInfo.sourceDir ?: return null
+        return runCatching { File(apkPath).readBytes() }.getOrNull()
+    }
+
+    /**
+     * 当前注入载荷（system_server / zygote 通用）的指纹：由 payload + 注入器 + init 加载器
+     * 的内容哈希共同决定。任何 so 或 dex 内容一变，指纹即变，强制下次服务启动重新注入。
+     */
+    private fun currentDeployHash(context: Context): String {
+        val parts = listOf(
+            payloadHash(context),
+            deployHash(context, "libkail_inject.so"),
+            deployHash(context, "libfakeloc_init.so"),
+            deployHash(context, "libfakeloc_initzygote.so"),
+            deployHash(context, "liblhooker.so")
+        )
+        if (parts.any { it.isEmpty() }) return ""
+        return md5Hex(parts.joinToString("|").toByteArray())
+    }
+
+    /** 读取源字节：优先 APK zip 条目，否则 nativeLibraryDir 文件（与 copyAndChmod 同源）。 */
+    private fun sourceBytes(context: Context, zipEntry: String, src: File): ByteArray? {
+        return runCatching {
+            val apkPath = context.applicationInfo.sourceDir ?: return null
+            ZipFile(apkPath).use { zip ->
+                val entry = zip.getEntry(zipEntry) ?: return null
+                zip.getInputStream(entry).use { it.readBytes() }
+            }
+        }.getOrNull() ?: runCatching { src.readBytes() }.getOrNull()
     }
 }

@@ -403,7 +403,7 @@ public class LHooker {
         try {
             File dir = new File("/data/kail-loc");
             File[] files = dir.listFiles((d, name) ->
-                name.startsWith("liblhooker") && name.contains("_v") && name.endsWith(".so"));
+                name.startsWith("liblhooker") && name.endsWith(".so"));
             if (files != null && files.length > 0) {
                 for (File f : files) {
                     String name = f.getName();

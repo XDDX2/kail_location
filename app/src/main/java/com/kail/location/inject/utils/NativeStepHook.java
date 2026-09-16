@@ -1,7 +1,5 @@
 package com.kail.location.inject.utils;
 
-import java.io.File;
-
 /**
  * Inject-side bridge to {@code libkail_native_hook.so} (native_hook/hook.cpp),
  * used for ROOT-mode step/gait simulation.
@@ -20,7 +18,6 @@ import java.io.File;
 public final class NativeStepHook {
 
     private static final String TAG = "NativeStepHook";
-    private static final String HOOK_SO_DIR = "/data/kail-loc";
     private static final String LEGACY_SO_PATH = "/data/kail-loc/libkail_native_hook.so";
 
     private static volatile boolean loaded = false;
@@ -59,18 +56,6 @@ public final class NativeStepHook {
     }
 
     private static String resolveSoPath() {
-        try {
-            File dir = new File(HOOK_SO_DIR);
-            File[] files = dir.listFiles((d, name) ->
-                name.startsWith("libkail_native_hook_v") && name.endsWith(".so"));
-            if (files != null && files.length > 0) {
-                String path = files[0].getAbsolutePath();
-                InjectLog.i(TAG, "resolved " + path);
-                return path;
-            }
-        } catch (Throwable t) {
-            InjectLog.w(TAG, "resolve so path failed: " + t.getMessage());
-        }
         return LEGACY_SO_PATH;
     }
 

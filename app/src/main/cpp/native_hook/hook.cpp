@@ -134,10 +134,12 @@ static void logLeakDiag() {
 }
 
 static void maybeLogLeakDiag() {
+    // 该检查位于传感器事件热路径（每次 send_objects / convert 都进来），
+    // 打印本身节流到 60 秒一次，避免持续模拟时 logcat 被 [LEAK] 刷屏。
     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     int64_t last = g_last_diag_ms.load(std::memory_order_relaxed);
-    if (now_ms - last < 10000) return;
+    if (now_ms - last < 60000) return;
     if (!g_last_diag_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) return;
     logLeakDiag();
 }
@@ -274,7 +276,7 @@ static bool synthesizeStepEventFromCarrierLocked(void* eventOut, int carrierType
         *(uint64_t*)((char*)eventOut + 0x18) = step_count_total;
         step_emit_phase = 1;
         uint64_t synth = step_synth_events.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (synth <= 5 || (synth % 20ULL) == 0ULL) {
+        if (synth <= 5 || (synth % 100ULL) == 0ULL) {
             KLOGI(kHookTag, "step COUNTER emit #%llu carrier=%d handle=%d total=%llu pendingDetector=%d",
                   (unsigned long long)synth, carrierType, mSensorHandleStepCounter,
                   (unsigned long long)step_count_total, pending_step_detector_events);
@@ -287,7 +289,7 @@ static bool synthesizeStepEventFromCarrierLocked(void* eventOut, int carrierType
         *(float*)((char*)eventOut + 0x18) = 1.0f;
         step_emit_phase = 0;
         uint64_t synth = step_synth_events.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (synth <= 5 || (synth % 20ULL) == 0ULL) {
+        if (synth <= 5 || (synth % 100ULL) == 0ULL) {
             KLOGI(kHookTag, "step DETECTOR emit #%llu carrier=%d handle=%d total=%llu pendingCounter=%d",
                   (unsigned long long)synth, carrierType, mSensorHandleStepDetector,
                   (unsigned long long)step_count_total, pending_step_counter_events);

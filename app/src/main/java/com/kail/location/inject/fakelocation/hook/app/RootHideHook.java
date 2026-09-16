@@ -52,8 +52,8 @@ public class RootHideHook {
             add("/data/local/kail-lib");
             add("/data/system/kail-loc");
             // 注入器 / dex / 原生库。用"不带版本号、不带扩展名"的片段匹配，
-            // 才能覆盖 liblhooker64_v46.so、libfakeloc_apphook_v46.so、
-            // libantidetect64.so、libkail_native_hook_v46.so 等实际落盘命名。
+            // 才能覆盖 liblhooker64.so、libfakeloc_apphook.so、
+            // libantidetect64.so、libkail_native_hook.so 等实际落盘命名。
             add("kail_inject");
             add("liblhooker");
             add("libfakeloc");
